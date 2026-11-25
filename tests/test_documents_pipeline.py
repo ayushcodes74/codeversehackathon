@@ -6,6 +6,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+
 import pymupdf
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -15,18 +16,21 @@ BACKEND_DIR = REPO_ROOT / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
+from app.api import documents as api_documents
 from app.api.documents import MAX_UPLOAD_BYTES, router as documents_router
-from app.documents.field_mapper import map_document_fields_to_form
-from app.documents.validator import FourStageDocumentValidator
+from app.documents import (
+    DOCUMENT_AGENT_TOOLS,
+    DOCUMENT_TOOL_DEFINITIONS,
+    FourStageDocumentValidator,
+    map_document_fields_to_form,
+    run_document_extraction_tool,
+    run_map_form_fields_tool,
+)
+from app.documents import agent_tools
+from app.documents import paddle_ocr as paddle_ocr_module
 from app.policies.log_redactor import redact_dict, redact_sensitive_text
 
-_CONTRACTS_SPEC = importlib.util.spec_from_file_location(
-    "shared_contracts_schemas_documents",
-    REPO_ROOT / "shared-contracts" / "schemas" / "documents.py",
-)
-_contracts = importlib.util.module_from_spec(_CONTRACTS_SPEC)
-assert _CONTRACTS_SPEC.loader is not None
-_CONTRACTS_SPEC.loader.exec_module(_contracts)
+_contracts = agent_tools._load_shared_document_contracts()
 DocumentExtractionResult = _contracts.DocumentExtractionResult
 MapFormFieldsResponse = _contracts.MapFormFieldsResponse
 
@@ -285,3 +289,86 @@ def test_documents_api_extract_and_validate_contracts_and_guards() -> None:
         files={"file": ("oversize.png", b"0" * (MAX_UPLOAD_BYTES + 1), "image/png")},
     )
     assert resp_413.status_code == 413
+
+
+# --- 5. Agent Tools & Shared Singleton Tests ---
+def test_agent_tools_and_shared_ocr_singleton() -> None:
+    assert len(DOCUMENT_TOOL_DEFINITIONS) == 2
+    assert {t["function"]["name"] for t in DOCUMENT_TOOL_DEFINITIONS} == {
+        "extract_and_validate_document",
+        "map_document_fields_to_form",
+    }
+    assert set(DOCUMENT_AGENT_TOOLS.keys()) == {
+        "extract_and_validate_document",
+        "map_document_fields_to_form",
+    }
+
+    # api/documents.py delegates directly to agent_tools.py and shares its single OCR singleton
+    assert api_documents.run_document_extraction_tool is agent_tools.run_document_extraction_tool
+    assert api_documents.run_map_form_fields_tool is agent_tools.run_map_form_fields_tool
+    assert agent_tools._get_ocr_engine() is agent_tools._get_ocr_engine()
+
+    pdf_doc = pymupdf.open()
+    page = pdf_doc.new_page()
+    page.insert_text(
+        (72, 72),
+        "INCOME TAX DEPARTMENT\nPermanent Account Number\nABCDE1234F\nMADHAV SHARMA\nFather's Name: RAJESH SHARMA\n15/08/1998",
+    )
+    pdf_bytes = pdf_doc.tobytes()
+    pdf_doc.close()
+
+    extraction = run_document_extraction_tool(
+        file_bytes=pdf_bytes,
+        mime_type="application/pdf",
+        expected_doc_type="pan",
+        profile_id="self",
+        profile_full_name="Madhav Sharma",
+    )
+    assert isinstance(extraction, DocumentExtractionResult)
+    assert extraction.detected_doc_type.value == "pan"
+    assert extraction.extraction_method == "pymupdf_text"
+    assert extraction.vault_commit_recommended is True
+
+    mapped = run_map_form_fields_tool(
+        profile_id="self",
+        doc_type="pan",
+        available_field_keys=["pan_number", "full_name"],
+        form_fields=[
+            {"element_key": "pan_el", "label": "Permanent Account Number", "input_type": "text", "required": True},
+        ],
+    )
+    assert isinstance(mapped, MapFormFieldsResponse)
+    assert mapped.mappings[0].source_ref == "vault:self.pan.pan_number"
+
+
+def test_paddle_ocr_extract_lines_and_field_parsing(monkeypatch) -> None:
+    class FakePaddleEngine:
+        def ocr(self, image, cls: bool = True):
+            assert image is not None and cls is True
+            return [[
+                [[[10, 10], [260, 10], [260, 40], [10, 40]], ("INCOME TAX DEPARTMENT", 0.97)],
+                [[[10, 50], [220, 50], [220, 80], [10, 80]], ("MADHAV SHARMA", 0.93)],
+                [[[10, 90], [280, 90], [280, 120], [10, 120]], ("Father's Name: RAJESH SHARMA", 0.91)],
+                [[[10, 130], [180, 130], [180, 160], [10, 160]], ("ABCDE1234F", 0.74)],
+                [[[10, 170], [190, 170], [190, 200], [10, 200]], ("DOB: 15/08/1998", 0.89)],
+            ]]
+
+    monkeypatch.setattr(paddle_ocr_module, "_create_paddle_ocr", lambda lang: FakePaddleEngine())
+
+    synthetic_card = np.full((220, 320, 3), 240, dtype=np.uint8)
+    ocr = paddle_ocr_module.BilingualDocumentOCR(confidence_threshold=0.80)
+    lines = ocr.extract_lines(_encode_png(synthetic_card), lang="en")
+
+    assert len(lines) == 5
+    assert lines[0]["bbox"] == {"x": 10, "y": 10, "width": 250, "height": 30}
+
+    doc_type, class_conf, fields = ocr.classify_and_parse(lines)
+    assert doc_type == "pan"
+    assert class_conf >= 0.65
+
+    by_key = {f["key"]: f for f in fields}
+    assert by_key["full_name"]["value"] == "MADHAV SHARMA"
+    assert by_key["full_name"]["needs_user_verification"] is False
+    assert by_key["pan_number"]["value"] == "ABCDE1234F"
+    assert by_key["pan_number"]["needs_user_verification"] is True
+    assert by_key["dob"]["value"] == "15/08/1998"
