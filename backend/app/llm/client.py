@@ -104,7 +104,7 @@ class BaseLLMClient(ABC):
                 validated = response_model.model_validate(response.parsed)
             except ValidationError as exc:
                 raise LLMStructuredOutputError(
-                    f"Structured LLM output failed schema validation: {exc.errors()}"
+                    f"Structured LLM output failed {response_model.__name__} validation."
                 ) from exc
             return response.model_copy(update={"parsed": validated})
 

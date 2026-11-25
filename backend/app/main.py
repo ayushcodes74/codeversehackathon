@@ -25,9 +25,9 @@ logger = logging.getLogger("app.main")
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI):
+async def lifespan(app_instance: FastAPI):
     """Manage FastAPI startup and shutdown lifecycle hooks."""
-    active_settings = get_settings()
+    active_settings = getattr(app_instance.state, "settings", None) or get_settings()
     logger.info(
         "Starting %s v%s in %s mode",
         active_settings.app_name,
@@ -52,6 +52,9 @@ def create_app(custom_settings: AppSettings | None = None) -> FastAPI:
         openapi_url="/openapi.json" if active_settings.docs_enabled else None,
         lifespan=lifespan,
     )
+    application.state.settings = active_settings
+    if custom_settings is not None:
+        application.dependency_overrides[get_settings] = lambda: active_settings
 
     register_middlewares(application, active_settings)
     register_exception_handlers(application, active_settings)
