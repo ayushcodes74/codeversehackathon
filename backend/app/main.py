@@ -1,6 +1,8 @@
 """FastAPI application entry point for Universal AI Web Assistant (v3.0)."""
 
+import logging
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -11,38 +13,78 @@ from fastapi import Depends, FastAPI
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.db_routes import router as db_router
-from app.api.documents import router as documents_router
+from app.api.router import register_routers
+from app.core.config import AppSettings, get_settings
+from app.core.exceptions import register_exception_handlers
+from app.core.logging import configure_logging
+from app.core.middleware import register_middlewares
 from app.database import get_db
-from app.policies.log_redactor import install_log_redaction, redact_sensitive_text
+from app.policies.log_redactor import redact_sensitive_text
 
-install_log_redaction()
-
-app = FastAPI(title="Universal AI Web Assistant API", version="3.0.0")
-
-app.include_router(db_router)
-app.include_router(documents_router)
+logger = logging.getLogger("app.main")
 
 
-@app.get("/health")
-async def health_check():
-    """Lightweight liveness check."""
-    return {
-        "status": "ok",
-        "service": "universal-ai-web-assistant",
-        "version": "3.0.0",
-    }
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Manage FastAPI startup and shutdown lifecycle hooks."""
+    active_settings = get_settings()
+    logger.info(
+        "Starting %s v%s in %s mode",
+        active_settings.app_name,
+        active_settings.app_version,
+        active_settings.app_env,
+    )
+    yield
+    logger.info("Shutting down %s", active_settings.app_name)
 
 
-@app.get("/health/db")
-async def check_db(db: AsyncSession = Depends(get_db)):
-    """Verify PostgreSQL connectivity via SELECT 1 without unhandled 500s."""
-    try:
-        await db.execute(text("SELECT 1"))
-        return {"status": "connected", "database": "ok"}
-    except Exception as exc:
-        return {
-            "status": "unhealthy",
-            "database": "error",
-            "detail": redact_sensitive_text(str(exc)),
-        }
+def create_app(custom_settings: AppSettings | None = None) -> FastAPI:
+    """Create and configure the FastAPI application instance."""
+    active_settings = custom_settings or get_settings()
+    configure_logging(active_settings.log_level)
+
+    application = FastAPI(
+        title=active_settings.app_name,
+        version=active_settings.app_version,
+        debug=active_settings.debug,
+        docs_url="/docs" if active_settings.docs_enabled else None,
+        redoc_url="/redoc" if active_settings.docs_enabled else None,
+        openapi_url="/openapi.json" if active_settings.docs_enabled else None,
+        lifespan=lifespan,
+    )
+
+    register_middlewares(application, active_settings)
+    register_exception_handlers(application, active_settings)
+    register_routers(application, active_settings)
+
+    @application.get("/health/db", tags=["Health"])
+    async def check_db(db: AsyncSession = Depends(get_db)):
+        """Verify PostgreSQL connectivity via SELECT 1 without unhandled 500s."""
+        try:
+            await db.execute(text("SELECT 1"))
+            return {"status": "connected", "database": "ok"}
+        except Exception as exc:
+            return {
+                "status": "unhealthy",
+                "database": "error",
+                "detail": redact_sensitive_text(str(exc)),
+            }
+
+    return application
+
+
+app = create_app()
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    runtime_settings = get_settings()
+    uvicorn.run(
+        "app.main:app",
+        app_dir=str(BACKEND_DIR),
+        host=runtime_settings.host,
+        port=runtime_settings.port,
+        reload=runtime_settings.is_development,
+        log_level=runtime_settings.log_level.lower(),
+    )
