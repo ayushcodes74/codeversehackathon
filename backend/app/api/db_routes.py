@@ -1,7 +1,11 @@
-"""Database state, Domain Shield, user profile, and task checkpoint routes."""
+"""Database state, Domain Shield, caller auth, profile memory, and task lifecycle routes."""
 
 import base64
+import hashlib
+import hmac
 import json
+import os
+import time
 import uuid
 from enum import Enum
 from typing import Any, Optional
@@ -13,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db
+from app.database import get_db, settings
 from app.models import (
     AgentMemory,
     ApprovedPortal,
@@ -116,7 +120,6 @@ ALLOWED_STATE_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
         {
             TaskState.AWAITING_APPROVAL,
             TaskState.AWAITING_SUBMIT_APPROVAL,
-            TaskState.VERIFYING,
             TaskState.PAUSED_FOR_AUTH_OR_CAPTCHA,
             TaskState.AWAITING_USER_INPUT,
             TaskState.FAILED,
@@ -151,9 +154,9 @@ ALLOWED_STATE_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
             TaskState.CANCELLED,
         }
     ),
+    # Transitions to SUBMITTING / SUBMITTED are exclusively gated through POST /tasks/{task_id}/approval (PRD FR-027).
     TaskState.AWAITING_APPROVAL: frozenset(
         {
-            TaskState.SUBMITTING,
             TaskState.FILLING,
             TaskState.CANCELLED,
             TaskState.FAILED,
@@ -161,43 +164,142 @@ ALLOWED_STATE_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
     ),
     TaskState.AWAITING_SUBMIT_APPROVAL: frozenset(
         {
-            TaskState.SUBMITTING,
-            TaskState.VERIFYING,
-            TaskState.SUBMITTED,
             TaskState.FILLING,
             TaskState.CANCELLED,
             TaskState.FAILED,
         }
     ),
-    TaskState.SUBMITTING: frozenset(
-        {TaskState.VERIFYING, TaskState.SUBMITTED, TaskState.FAILED}
-    ),
-    TaskState.VERIFYING: frozenset({TaskState.SUBMITTED, TaskState.FAILED}),
+    TaskState.SUBMITTING: frozenset({TaskState.FAILED, TaskState.CANCELLED}),
+    TaskState.VERIFYING: frozenset({TaskState.FAILED, TaskState.CANCELLED}),
     TaskState.SUBMITTED: frozenset(),
     TaskState.FAILED: frozenset(),
     TaskState.CANCELLED: frozenset(),
 }
 
 
-def _extract_jwt_subject(authorization: Optional[str]) -> Optional[str]:
-    """Extract `user_id` or `sub` claim from a Bearer JWT payload if present."""
-    if not authorization:
-        return None
+def _get_jwt_secret() -> str:
+    return getattr(settings, "secret_key", None) or os.getenv(
+        "JWT_SECRET_KEY", "dev-local-secret-change-in-prod"
+    )
+
+
+def _is_production_env() -> bool:
+    return os.getenv("ENV", "development").strip().lower() == "production"
+
+
+def _allow_dev_user_header() -> bool:
+    if _is_production_env():
+        return False
+    return os.getenv("ALLOW_DEV_USER_HEADER", "true").strip().lower() == "true"
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(data: str) -> bytes:
+    padded = data + "=" * (-len(data) % 4)
+    return base64.urlsafe_b64decode(padded.encode("ascii"))
+
+
+def create_hs256_jwt(user_id: str, expires_in_seconds: int = 3600) -> str:
+    """Issue a signed HS256 JWT containing sub and user_id claims."""
+    now = int(time.time())
+    header = {"alg": "HS256", "typ": "JWT"}
+    payload = {
+        "sub": str(user_id),
+        "user_id": str(user_id),
+        "iat": now,
+        "exp": now + expires_in_seconds,
+    }
+    signing_input = (
+        f"{_b64url_encode(json.dumps(header, separators=(',', ':')).encode('utf-8'))}."
+        f"{_b64url_encode(json.dumps(payload, separators=(',', ':')).encode('utf-8'))}"
+    )
+    sig = hmac.new(
+        _get_jwt_secret().encode("utf-8"),
+        signing_input.encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+    return f"{signing_input}.{_b64url_encode(sig)}"
+
+
+def _verify_hs256_jwt(authorization: str) -> str:
+    """Verify Bearer HS256 JWT signature and expiry; raise 401 on any failure."""
     parts = authorization.strip().split(" ", 1)
     if len(parts) != 2 or parts[0].lower() != "bearer":
-        return None
-    segments = parts[1].strip().split(".")
-    if len(segments) != 3:
-        return None
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Authorization header scheme; expected Bearer token.",
+        )
+    token = parts[1].strip()
+    segments = token.split(".")
+    if len(segments) != 3 or any(not seg for seg in segments):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Malformed JWT token.",
+        )
+
+    header_b64, payload_b64, sig_b64 = segments
     try:
-        padded = segments[1] + "=" * (-len(segments[1]) % 4)
-        claims = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
-        if isinstance(claims, dict):
-            val = claims.get("user_id") or claims.get("sub")
-            return str(val).strip() if val is not None else None
-    except Exception:
-        return None
-    return None
+        header = json.loads(_b64url_decode(header_b64).decode("utf-8"))
+        payload = json.loads(_b64url_decode(payload_b64).decode("utf-8"))
+        provided_sig = _b64url_decode(sig_b64)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid JWT encoding.",
+        ) from exc
+
+    if not isinstance(header, dict) or header.get("alg") != "HS256":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unsupported or unsigned JWT algorithm.",
+        )
+
+    signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
+    expected_sig = hmac.new(
+        _get_jwt_secret().encode("utf-8"),
+        signing_input,
+        hashlib.sha256,
+    ).digest()
+    if not hmac.compare_digest(expected_sig, provided_sig):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid JWT signature.",
+        )
+
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid JWT payload.",
+        )
+    exp = payload.get("exp")
+    if exp is None or isinstance(exp, bool):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token missing required exp claim.",
+        )
+    try:
+        exp_ts = float(exp)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token missing required exp claim.",
+        ) from exc
+    if exp_ts <= time.time():
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="JWT token has expired.",
+        )
+
+    subject = payload.get("user_id") or payload.get("sub")
+    if subject is None or not str(subject).strip():
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="JWT token missing subject claim.",
+        )
+    return str(subject).strip()
 
 
 def verify_caller_ownership(
@@ -205,13 +307,22 @@ def verify_caller_ownership(
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
     authorization: Optional[str] = Header(default=None, alias="Authorization"),
 ) -> None:
-    """Enforce caller ownership against X-User-Id header or JWT sub claim (PRD FR-005)."""
+    """Fail-closed caller ownership check using signed HS256 JWT or local dev X-User-Id."""
     target_id = str(requested_user_id).strip()
-    caller_id: Optional[str] = x_user_id.strip() if isinstance(x_user_id, str) and x_user_id.strip() else None
-    if caller_id is None:
-        caller_id = _extract_jwt_subject(authorization)
+    caller_id: Optional[str] = None
 
-    if caller_id is not None and caller_id != target_id:
+    if authorization and authorization.strip():
+        caller_id = _verify_hs256_jwt(authorization)
+    elif _allow_dev_user_header() and isinstance(x_user_id, str) and x_user_id.strip():
+        caller_id = x_user_id.strip()
+
+    if caller_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required: provide Authorization Bearer JWT.",
+        )
+
+    if caller_id != target_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Forbidden: caller identity does not match requested user_id.",
@@ -219,6 +330,11 @@ def verify_caller_ownership(
 
 
 # --- Pydantic Schemas ---
+class DevTokenRequest(BaseModel):
+    user_id: str = Field(..., min_length=1)
+    expires_in_seconds: int = Field(default=3600, ge=60, le=86400)
+
+
 class GoogleAuthUpsert(BaseModel):
     google_sub: str
     email: str
@@ -253,6 +369,29 @@ class TaskCheckpointUpdate(BaseModel):
     current_step_index: int | None = Field(default=None, ge=0)
     checkpoint_state: dict[str, Any] | None = None
     application_ref_no: str | None = None
+
+
+class TaskApprovalRequest(BaseModel):
+    approved: bool
+    action_hash: str = Field(..., min_length=1)
+    reviewer_note: str | None = None
+
+
+# --- 0. Local Dev Token Helper (Disabled in Production) ---
+@router.post("/auth/dev-token")
+async def issue_dev_token(payload: DevTokenRequest):
+    """Issue a signed HS256 JWT in non-production environments for local dev & tests."""
+    if _is_production_env():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Dev token issuance is disabled in production.",
+        )
+    token = create_hs256_jwt(payload.user_id, expires_in_seconds=payload.expires_in_seconds)
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user_id": payload.user_id,
+    }
 
 
 # --- 1. User Upsert (Auto-creates default 'self' FamilyProfile) ---
@@ -336,7 +475,20 @@ async def create_family_profile(
     return profile
 
 
-# --- 3. Editable Agent Memory (Get & Upsert) ---
+# --- 3. Editable Agent Memory (Get & Upsert with Cross-User Profile Isolation) ---
+async def _verify_profile_belongs_to_user(
+    db: AsyncSession, user_id: uuid.UUID, profile_id: uuid.UUID
+) -> None:
+    profile = await db.get(FamilyProfile, profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Family profile not found")
+    if str(profile.user_id) != str(user_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: profile_id does not belong to this user.",
+        )
+
+
 @router.get("/users/{user_id}/memory")
 async def get_user_memory(
     user_id: uuid.UUID,
@@ -347,8 +499,11 @@ async def get_user_memory(
 ):
     verify_caller_ownership(str(user_id), x_user_id=x_user_id, authorization=authorization)
 
+    if profile_id is not None:
+        await _verify_profile_belongs_to_user(db, user_id, profile_id)
+
     stmt = select(AgentMemory).where(AgentMemory.user_id == user_id)
-    if profile_id:
+    if profile_id is not None:
         stmt = stmt.where(AgentMemory.profile_id == profile_id)
     result = await db.execute(stmt)
     return result.scalars().all()
@@ -363,6 +518,9 @@ async def upsert_memory(
     authorization: Optional[str] = Header(default=None, alias="Authorization"),
 ):
     verify_caller_ownership(str(user_id), x_user_id=x_user_id, authorization=authorization)
+
+    if payload.profile_id is not None:
+        await _verify_profile_belongs_to_user(db, user_id, payload.profile_id)
 
     stmt = select(AgentMemory).where(
         AgentMemory.user_id == user_id,
@@ -451,7 +609,7 @@ async def verify_domain(
     }
 
 
-# --- 5. Task Lifecycle, Read, History & Safe-Pause Checkpoints ---
+# --- 5. Task Lifecycle, Read, History, Approval Gate & Safe-Pause Checkpoints ---
 @router.post("/tasks", status_code=status.HTTP_201_CREATED)
 async def create_task(
     payload: TaskCreate,
@@ -482,8 +640,11 @@ async def create_task(
 
     if payload.portal_id is not None:
         portal = await db.get(ApprovedPortal, payload.portal_id)
-        if not portal:
-            raise HTTPException(status_code=404, detail="Approved portal not found")
+        if not portal or not portal.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Target portal is inactive or not registered in approved_portals.",
+            )
 
     task = Task(
         user_id=payload.user_id,
@@ -513,6 +674,15 @@ async def create_task(
     }
 
 
+def _compute_pending_action_hash(task: Task) -> str:
+    """Compute a deterministic SHA-256 digest binding approval to current task state."""
+    canonical = (
+        f"{task.id}:{task.user_id}:{task.profile_id}:{task.portal_id}:"
+        f"{task.current_step_index}:{json.dumps(task.checkpoint_state or {}, sort_keys=True)}"
+    )
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 @router.get("/tasks/{task_id}")
 async def get_task(
     task_id: uuid.UUID,
@@ -526,6 +696,13 @@ async def get_task(
 
     verify_caller_ownership(str(task.user_id), x_user_id=x_user_id, authorization=authorization)
 
+    pending_action_hash: Optional[str] = None
+    if task.status in (
+        TaskState.AWAITING_APPROVAL.value,
+        TaskState.AWAITING_SUBMIT_APPROVAL.value,
+    ):
+        pending_action_hash = _compute_pending_action_hash(task)
+
     return {
         "id": task.id,
         "user_id": task.user_id,
@@ -535,6 +712,7 @@ async def get_task(
         "state": task.status,
         "current_step_index": task.current_step_index,
         "checkpoint_state": redact_dict(task.checkpoint_state),
+        "pending_action_hash": pending_action_hash,
         "application_ref_no": (
             redact_sensitive_text(task.application_ref_no)
             if task.application_ref_no is not None
@@ -543,6 +721,17 @@ async def get_task(
         "created_at": task.created_at,
         "updated_at": task.updated_at,
     }
+
+
+def _sanitize_audit_payload(data: dict[str, Any] | None) -> dict[str, Any]:
+    """Redact PII in audit payloads while preserving cryptographic digests and IDs."""
+    if not data:
+        return {}
+    sanitized = redact_dict(data)
+    for safe_key in ("action_hash", "task_id"):
+        if safe_key in data:
+            sanitized[safe_key] = data[safe_key]
+    return sanitized
 
 
 @router.get("/tasks/{task_id}/history")
@@ -572,8 +761,8 @@ async def get_task_history(
                 "task_id": entry.task_id,
                 "tool_name": entry.tool_name,
                 "status": entry.status,
-                "sanitized_input": redact_dict(entry.sanitized_input),
-                "sanitized_output": redact_dict(entry.sanitized_output),
+                "sanitized_input": _sanitize_audit_payload(entry.sanitized_input),
+                "sanitized_output": _sanitize_audit_payload(entry.sanitized_output),
                 "created_at": entry.created_at,
             }
             for entry in entries
@@ -602,6 +791,14 @@ async def save_task_checkpoint(
             current_state = None
 
         if current_state is not None:
+            if payload.status in (TaskState.SUBMITTING, TaskState.SUBMITTED) and payload.status != current_state:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"Direct transition to '{payload.status.value}' is not permitted via /checkpoint; "
+                        "use POST /api/v1/tasks/{task_id}/approval."
+                    ),
+                )
             if current_state in TERMINAL_TASK_STATES and payload.status != current_state:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
@@ -643,3 +840,68 @@ async def save_task_checkpoint(
     await db.flush()
 
     return {"task_id": task.id, "status": task.status, "step": task.current_step_index}
+
+
+@router.post("/tasks/{task_id}/approval")
+async def approve_task_submission(
+    task_id: uuid.UUID,
+    payload: TaskApprovalRequest,
+    db: AsyncSession = Depends(get_db),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+):
+    """Action-bound human-in-the-loop approval gate before final portal submission (PRD FR-027)."""
+    task = await db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    verify_caller_ownership(str(task.user_id), x_user_id=x_user_id, authorization=authorization)
+
+    if task.status not in (
+        TaskState.AWAITING_APPROVAL.value,
+        TaskState.AWAITING_SUBMIT_APPROVAL.value,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Task must be in '{TaskState.AWAITING_SUBMIT_APPROVAL.value}' state to record approval (current: '{task.status}').",
+        )
+
+    expected_hash = _compute_pending_action_hash(task)
+    if not hmac.compare_digest(payload.action_hash.strip(), expected_hash):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Action hash mismatch: pending task state changed after approval prompt (FR-027).",
+        )
+
+    next_state = TaskState.SUBMITTED if payload.approved else TaskState.CANCELLED
+    task.status = next_state.value
+
+    sanitized_note = (
+        redact_sensitive_text(payload.reviewer_note)
+        if payload.reviewer_note is not None
+        else None
+    )
+    audit_log = ToolAuditLog(
+        task_id=task.id,
+        tool_name="task_submit_approval",
+        status="approved" if payload.approved else "rejected",
+        sanitized_input={
+            "approved": payload.approved,
+            "action_hash": payload.action_hash,
+            "reviewer_note": sanitized_note,
+        },
+        sanitized_output={
+            "task_id": str(task.id),
+            "status": task.status,
+            "action_hash": payload.action_hash,
+        },
+    )
+    db.add(audit_log)
+    await db.flush()
+
+    return {
+        "task_id": task.id,
+        "status": task.status,
+        "approved": payload.approved,
+        "action_hash": payload.action_hash,
+    }
