@@ -1,11 +1,13 @@
 """Database state, Domain Shield, user profile, and task checkpoint routes."""
 
+import base64
+import json
 import uuid
 from enum import Enum
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -20,23 +22,200 @@ from app.models import (
     ToolAuditLog,
     User,
 )
-from app.policies.log_redactor import redact_dict
+from app.policies.log_redactor import redact_dict, redact_sensitive_text
 
 router = APIRouter(prefix="/api/v1", tags=["Database & State"])
 
 
 class TaskState(str, Enum):
-    """Allowed workflow states for Safe-Pause task checkpoints."""
+    """Allowed workflow states for task lifecycle and Safe-Pause checkpoints."""
 
     DISCOVERING = "discovering"
+    PLANNING = "planning"
+    COLLECTING_DOCS = "collecting_docs"
     NAVIGATING = "navigating"
     INSPECTING_FORM = "inspecting_form"
     MAPPING_FIELDS = "mapping_fields"
+    FILLING = "filling"
     AWAITING_USER_INPUT = "awaiting_user_input"
     PAUSED_FOR_AUTH_OR_CAPTCHA = "paused_for_auth_or_captcha"
+    AWAITING_APPROVAL = "awaiting_approval"
     AWAITING_SUBMIT_APPROVAL = "awaiting_submit_approval"
+    SUBMITTING = "submitting"
+    VERIFYING = "verifying"
     SUBMITTED = "submitted"
     FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+TERMINAL_TASK_STATES = frozenset(
+    {TaskState.SUBMITTED, TaskState.FAILED, TaskState.CANCELLED}
+)
+
+ALLOWED_STATE_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
+    TaskState.DISCOVERING: frozenset(
+        {
+            TaskState.PLANNING,
+            TaskState.COLLECTING_DOCS,
+            TaskState.NAVIGATING,
+            TaskState.AWAITING_USER_INPUT,
+            TaskState.FAILED,
+            TaskState.CANCELLED,
+        }
+    ),
+    TaskState.PLANNING: frozenset(
+        {
+            TaskState.COLLECTING_DOCS,
+            TaskState.NAVIGATING,
+            TaskState.AWAITING_APPROVAL,
+            TaskState.AWAITING_SUBMIT_APPROVAL,
+            TaskState.FAILED,
+            TaskState.CANCELLED,
+        }
+    ),
+    TaskState.COLLECTING_DOCS: frozenset(
+        {
+            TaskState.FILLING,
+            TaskState.MAPPING_FIELDS,
+            TaskState.AWAITING_APPROVAL,
+            TaskState.AWAITING_USER_INPUT,
+            TaskState.FAILED,
+            TaskState.CANCELLED,
+        }
+    ),
+    TaskState.NAVIGATING: frozenset(
+        {
+            TaskState.INSPECTING_FORM,
+            TaskState.PAUSED_FOR_AUTH_OR_CAPTCHA,
+            TaskState.AWAITING_USER_INPUT,
+            TaskState.FAILED,
+            TaskState.CANCELLED,
+        }
+    ),
+    TaskState.INSPECTING_FORM: frozenset(
+        {
+            TaskState.MAPPING_FIELDS,
+            TaskState.COLLECTING_DOCS,
+            TaskState.FILLING,
+            TaskState.AWAITING_USER_INPUT,
+            TaskState.FAILED,
+            TaskState.CANCELLED,
+        }
+    ),
+    TaskState.MAPPING_FIELDS: frozenset(
+        {
+            TaskState.FILLING,
+            TaskState.AWAITING_USER_INPUT,
+            TaskState.AWAITING_APPROVAL,
+            TaskState.AWAITING_SUBMIT_APPROVAL,
+            TaskState.FAILED,
+            TaskState.CANCELLED,
+        }
+    ),
+    TaskState.FILLING: frozenset(
+        {
+            TaskState.AWAITING_APPROVAL,
+            TaskState.AWAITING_SUBMIT_APPROVAL,
+            TaskState.VERIFYING,
+            TaskState.PAUSED_FOR_AUTH_OR_CAPTCHA,
+            TaskState.AWAITING_USER_INPUT,
+            TaskState.FAILED,
+            TaskState.CANCELLED,
+        }
+    ),
+    TaskState.AWAITING_USER_INPUT: frozenset(
+        {
+            TaskState.DISCOVERING,
+            TaskState.PLANNING,
+            TaskState.COLLECTING_DOCS,
+            TaskState.NAVIGATING,
+            TaskState.INSPECTING_FORM,
+            TaskState.MAPPING_FIELDS,
+            TaskState.FILLING,
+            TaskState.PAUSED_FOR_AUTH_OR_CAPTCHA,
+            TaskState.AWAITING_APPROVAL,
+            TaskState.AWAITING_SUBMIT_APPROVAL,
+            TaskState.FAILED,
+            TaskState.CANCELLED,
+        }
+    ),
+    TaskState.PAUSED_FOR_AUTH_OR_CAPTCHA: frozenset(
+        {
+            TaskState.NAVIGATING,
+            TaskState.INSPECTING_FORM,
+            TaskState.MAPPING_FIELDS,
+            TaskState.FILLING,
+            TaskState.AWAITING_APPROVAL,
+            TaskState.AWAITING_SUBMIT_APPROVAL,
+            TaskState.FAILED,
+            TaskState.CANCELLED,
+        }
+    ),
+    TaskState.AWAITING_APPROVAL: frozenset(
+        {
+            TaskState.SUBMITTING,
+            TaskState.FILLING,
+            TaskState.CANCELLED,
+            TaskState.FAILED,
+        }
+    ),
+    TaskState.AWAITING_SUBMIT_APPROVAL: frozenset(
+        {
+            TaskState.SUBMITTING,
+            TaskState.VERIFYING,
+            TaskState.SUBMITTED,
+            TaskState.FILLING,
+            TaskState.CANCELLED,
+            TaskState.FAILED,
+        }
+    ),
+    TaskState.SUBMITTING: frozenset(
+        {TaskState.VERIFYING, TaskState.SUBMITTED, TaskState.FAILED}
+    ),
+    TaskState.VERIFYING: frozenset({TaskState.SUBMITTED, TaskState.FAILED}),
+    TaskState.SUBMITTED: frozenset(),
+    TaskState.FAILED: frozenset(),
+    TaskState.CANCELLED: frozenset(),
+}
+
+
+def _extract_jwt_subject(authorization: Optional[str]) -> Optional[str]:
+    """Extract `user_id` or `sub` claim from a Bearer JWT payload if present."""
+    if not authorization:
+        return None
+    parts = authorization.strip().split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    segments = parts[1].strip().split(".")
+    if len(segments) != 3:
+        return None
+    try:
+        padded = segments[1] + "=" * (-len(segments[1]) % 4)
+        claims = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+        if isinstance(claims, dict):
+            val = claims.get("user_id") or claims.get("sub")
+            return str(val).strip() if val is not None else None
+    except Exception:
+        return None
+    return None
+
+
+def verify_caller_ownership(
+    requested_user_id: str | uuid.UUID,
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+) -> None:
+    """Enforce caller ownership against X-User-Id header or JWT sub claim (PRD FR-005)."""
+    target_id = str(requested_user_id).strip()
+    caller_id: Optional[str] = x_user_id.strip() if isinstance(x_user_id, str) and x_user_id.strip() else None
+    if caller_id is None:
+        caller_id = _extract_jwt_subject(authorization)
+
+    if caller_id is not None and caller_id != target_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: caller identity does not match requested user_id.",
+        )
 
 
 # --- Pydantic Schemas ---
@@ -71,7 +250,7 @@ class TaskCreate(BaseModel):
 
 class TaskCheckpointUpdate(BaseModel):
     status: TaskState | None = None
-    current_step_index: int | None = None
+    current_step_index: int | None = Field(default=None, ge=0)
     checkpoint_state: dict[str, Any] | None = None
     application_ref_no: str | None = None
 
@@ -116,8 +295,14 @@ async def upsert_user(payload: GoogleAuthUpsert, db: AsyncSession = Depends(get_
 # --- 2. Add Family / Dependent Profile ---
 @router.post("/users/{user_id}/profiles")
 async def create_family_profile(
-    user_id: uuid.UUID, payload: FamilyProfileCreate, db: AsyncSession = Depends(get_db)
+    user_id: uuid.UUID,
+    payload: FamilyProfileCreate,
+    db: AsyncSession = Depends(get_db),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
 ):
+    verify_caller_ownership(str(user_id), x_user_id=x_user_id, authorization=authorization)
+
     user = await db.get(User, user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -154,8 +339,14 @@ async def create_family_profile(
 # --- 3. Editable Agent Memory (Get & Upsert) ---
 @router.get("/users/{user_id}/memory")
 async def get_user_memory(
-    user_id: uuid.UUID, profile_id: uuid.UUID | None = None, db: AsyncSession = Depends(get_db)
+    user_id: uuid.UUID,
+    profile_id: uuid.UUID | None = None,
+    db: AsyncSession = Depends(get_db),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
 ):
+    verify_caller_ownership(str(user_id), x_user_id=x_user_id, authorization=authorization)
+
     stmt = select(AgentMemory).where(AgentMemory.user_id == user_id)
     if profile_id:
         stmt = stmt.where(AgentMemory.profile_id == profile_id)
@@ -165,8 +356,14 @@ async def get_user_memory(
 
 @router.put("/users/{user_id}/memory")
 async def upsert_memory(
-    user_id: uuid.UUID, payload: MemoryUpsert, db: AsyncSession = Depends(get_db)
+    user_id: uuid.UUID,
+    payload: MemoryUpsert,
+    db: AsyncSession = Depends(get_db),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
 ):
+    verify_caller_ownership(str(user_id), x_user_id=x_user_id, authorization=authorization)
+
     stmt = select(AgentMemory).where(
         AgentMemory.user_id == user_id,
         AgentMemory.profile_id == payload.profile_id,
@@ -254,9 +451,16 @@ async def verify_domain(
     }
 
 
-# --- 5. Task Creation & Safe-Pause Checkpoints ---
+# --- 5. Task Lifecycle, Read, History & Safe-Pause Checkpoints ---
 @router.post("/tasks", status_code=status.HTTP_201_CREATED)
-async def create_task(payload: TaskCreate, db: AsyncSession = Depends(get_db)):
+async def create_task(
+    payload: TaskCreate,
+    db: AsyncSession = Depends(get_db),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+):
+    verify_caller_ownership(str(payload.user_id), x_user_id=x_user_id, authorization=authorization)
+
     user = await db.get(User, payload.user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -297,30 +501,128 @@ async def create_task(payload: TaskCreate, db: AsyncSession = Depends(get_db)):
         "user_id": task.user_id,
         "profile_id": task.profile_id,
         "portal_id": task.portal_id,
+        "goal": task.goal_text,
         "user_goal": task.goal_text,
+        "state": task.status,
         "status": task.status,
         "current_step_index": task.current_step_index,
         "checkpoint_state": task.checkpoint_state,
+        "application_ref_no": task.application_ref_no,
         "created_at": task.created_at,
+        "updated_at": task.updated_at,
     }
 
 
-@router.patch("/tasks/{task_id}/checkpoint")
-async def save_task_checkpoint(
-    task_id: uuid.UUID, payload: TaskCheckpointUpdate, db: AsyncSession = Depends(get_db)
+@router.get("/tasks/{task_id}")
+async def get_task(
+    task_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
 ):
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
+    verify_caller_ownership(str(task.user_id), x_user_id=x_user_id, authorization=authorization)
+
+    return {
+        "id": task.id,
+        "user_id": task.user_id,
+        "profile_id": task.profile_id,
+        "portal_id": task.portal_id,
+        "goal": task.goal_text,
+        "state": task.status,
+        "current_step_index": task.current_step_index,
+        "checkpoint_state": redact_dict(task.checkpoint_state),
+        "application_ref_no": (
+            redact_sensitive_text(task.application_ref_no)
+            if task.application_ref_no is not None
+            else None
+        ),
+        "created_at": task.created_at,
+        "updated_at": task.updated_at,
+    }
+
+
+@router.get("/tasks/{task_id}/history")
+async def get_task_history(
+    task_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+):
+    task = await db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    verify_caller_ownership(str(task.user_id), x_user_id=x_user_id, authorization=authorization)
+
+    stmt = (
+        select(ToolAuditLog)
+        .where(ToolAuditLog.task_id == task_id)
+        .order_by(ToolAuditLog.created_at.asc())
+    )
+    entries = (await db.execute(stmt)).scalars().all()
+    return {
+        "task_id": task.id,
+        "history": [
+            {
+                "id": entry.id,
+                "task_id": entry.task_id,
+                "tool_name": entry.tool_name,
+                "status": entry.status,
+                "sanitized_input": redact_dict(entry.sanitized_input),
+                "sanitized_output": redact_dict(entry.sanitized_output),
+                "created_at": entry.created_at,
+            }
+            for entry in entries
+        ],
+    }
+
+
+@router.patch("/tasks/{task_id}/checkpoint")
+async def save_task_checkpoint(
+    task_id: uuid.UUID,
+    payload: TaskCheckpointUpdate,
+    db: AsyncSession = Depends(get_db),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+):
+    task = await db.get(Task, task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    verify_caller_ownership(str(task.user_id), x_user_id=x_user_id, authorization=authorization)
+
     if payload.status is not None:
+        try:
+            current_state = TaskState(task.status)
+        except ValueError:
+            current_state = None
+
+        if current_state is not None:
+            if current_state in TERMINAL_TASK_STATES and payload.status != current_state:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Terminal state '{current_state.value}' cannot transition to '{payload.status.value}'.",
+                )
+            if payload.status != current_state:
+                allowed = ALLOWED_STATE_TRANSITIONS.get(current_state, frozenset())
+                if payload.status not in allowed:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=f"Invalid state transition from '{current_state.value}' to '{payload.status.value}'.",
+                    )
+
         task.status = payload.status.value
+
     if payload.current_step_index is not None:
         task.current_step_index = payload.current_step_index
     if payload.checkpoint_state is not None:
         task.checkpoint_state = redact_dict(payload.checkpoint_state)
     if payload.application_ref_no is not None:
-        task.application_ref_no = payload.application_ref_no
+        task.application_ref_no = redact_sensitive_text(payload.application_ref_no)
 
     sanitized_input = redact_dict(payload.model_dump(mode="json", exclude_none=True))
     sanitized_output = redact_dict(
