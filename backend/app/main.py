@@ -1,7 +1,12 @@
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+
+from app.api.router import register_routers
+from app.core.config import AppSettings, get_settings
+from app.core.exceptions import register_exception_handlers
+from app.core.logging import configure_logging
+from app.core.middleware import register_middlewares
 from app.database import get_db
 from app.models import ApprovedPortal
 from app.api.db_routes import router as db_router
