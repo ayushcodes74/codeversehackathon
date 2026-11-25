@@ -1,8 +1,4 @@
-.venv/
+.env
 __pycache__/
 *.py[cod]
 .env
-backend/.env
-.pytest_cache/
-.vscode/
-tests/

@@ -1,16 +1,5 @@
-"""FastAPI application entry point for Universal AI Web Assistant (v3.0)."""
-
-import logging
-import sys
-from contextlib import asynccontextmanager
-from pathlib import Path
-
-BACKEND_DIR = Path(__file__).resolve().parents[1]
-if str(BACKEND_DIR) not in sys.path:
-    sys.path.insert(0, str(BACKEND_DIR))
-
-from fastapi import Depends, FastAPI
-from sqlalchemy import text
+from fastapi import FastAPI, Depends
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.router import register_routers
@@ -19,9 +8,27 @@ from app.core.exceptions import register_exception_handlers
 from app.core.logging import configure_logging
 from app.core.middleware import register_middlewares
 from app.database import get_db
-from app.policies.log_redactor import redact_sensitive_text
+from app.models import ApprovedPortal
+from app.api.db_routes import router as db_router
+from app.api.agent_routes import router as agent_router
 
-logger = logging.getLogger("app.main")
+app = FastAPI(
+    title="Universal AI Web Assistant API",
+    version="3.0.0",
+    description="Zero-Leak Hybrid AI Web Assistant API & Browser Automation Layer"
+)
+
+# Enable CORS for Chrome Extension and Demo Portal communication
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(db_router)
+app.include_router(agent_router)
 
 
 @asynccontextmanager
