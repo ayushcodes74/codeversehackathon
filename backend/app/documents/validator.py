@@ -1,6 +1,8 @@
 """4-stage document verification pipeline with OpenCV quality and auto-formatting."""
 
 import base64
+import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import cv2
@@ -8,7 +10,11 @@ import numpy as np
 import pymupdf
 from rapidfuzz import fuzz
 
-from .auto_formatter import auto_format_image_for_portal
+_BACKEND_DIR = Path(__file__).resolve().parents[2]
+if str(_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR))
+
+from app.documents.auto_formatter import auto_format_image_for_portal
 
 _IMAGE_FORMATTABLE_MIMES = ("image/jpeg", "image/png", "image/webp")
 

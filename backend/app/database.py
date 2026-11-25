@@ -1,18 +1,44 @@
-from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+"""Async SQLAlchemy database engine, settings, and session dependency."""
+
+from pathlib import Path
+
+from pydantic import field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
-from pydantic_settings import BaseSettings
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+
 
 class Settings(BaseSettings):
+    """Application database settings loaded reliably from backend/.env."""
+
     database_url: str
 
-    class Config:
-        env_file = ".env"
+    model_config = SettingsConfigDict(
+        env_file=str(BACKEND_DIR / ".env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _normalize_asyncpg_scheme(cls, value: str) -> str:
+        if not isinstance(value, str):
+            return value
+        url = value.strip()
+        if url.startswith("postgres://"):
+            return "postgresql+asyncpg://" + url[len("postgres://") :]
+        if url.startswith("postgresql://"):
+            return "postgresql+asyncpg://" + url[len("postgresql://") :]
+        return url
+
 
 settings = Settings()
 
 engine = create_async_engine(
     settings.database_url,
-    pool_pre_ping=True,  # Handles dropped connections automatically
+    pool_pre_ping=True,
     echo=False,
 )
 
@@ -22,11 +48,15 @@ AsyncSessionLocal = async_sessionmaker(
     expire_on_commit=False,
 )
 
+
 class Base(DeclarativeBase):
+    """Declarative base for ORM models."""
+
     pass
 
-# FastAPI dependency to inject a DB session per request
+
 async def get_db():
+    """FastAPI dependency to inject and commit/rollback an async DB session."""
     async with AsyncSessionLocal() as session:
         try:
             yield session

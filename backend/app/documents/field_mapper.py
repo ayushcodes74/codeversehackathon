@@ -1,9 +1,15 @@
 """Zero-leak DOM form field mapper emitting vault: reference tokens."""
 
 import re
+import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from rapidfuzz import fuzz
+
+_BACKEND_DIR = Path(__file__).resolve().parents[2]
+if str(_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR))
 
 _FIELD_SYNONYMS: Dict[str, Tuple[str, ...]] = {
     "pan_number": (
@@ -62,6 +68,19 @@ _FIELD_SYNONYMS: Dict[str, Tuple[str, ...]] = {
         "name as per aadhaar",
         "name as per pan",
         "your name",
+    ),
+    "roll_number": (
+        "roll number",
+        "roll no",
+        "enrollment number",
+        "seat number",
+        "registration number",
+    ),
+    "annual_income": (
+        "annual income",
+        "family income",
+        "total income",
+        "yearly income",
     ),
 }
 

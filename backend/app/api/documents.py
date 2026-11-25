@@ -14,15 +14,17 @@ import numpy as np
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field, ValidationError
 
-from ..documents.field_mapper import map_document_fields_to_form
-from ..documents.paddle_ocr import BilingualDocumentOCR
-from ..documents.pdf_reader import inspect_and_extract_pdf
-from ..documents.validator import FourStageDocumentValidator
-from ..policies.log_redactor import SensitiveDataLogFilter, install_log_redaction
+_BACKEND_DIR = Path(__file__).resolve().parents[2]
+_REPO_ROOT = _BACKEND_DIR.parent
+for _path_entry in (str(_BACKEND_DIR), str(_REPO_ROOT)):
+    if _path_entry not in sys.path:
+        sys.path.insert(0, _path_entry)
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+from app.documents.field_mapper import map_document_fields_to_form
+from app.documents.paddle_ocr import BilingualDocumentOCR
+from app.documents.pdf_reader import inspect_and_extract_pdf
+from app.documents.validator import FourStageDocumentValidator
+from app.policies.log_redactor import SensitiveDataLogFilter, install_log_redaction
 
 
 def _load_shared_document_contracts() -> Any:

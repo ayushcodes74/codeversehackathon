@@ -5,6 +5,11 @@ import re
 from typing import Any
 
 _PAN_RE = re.compile(r"(?<![A-Za-z0-9])[A-Z]{5}[0-9]{4}[A-Z](?![A-Za-z0-9])", re.IGNORECASE)
+# Redact context-labeled account numbers (9-18 digits) before UIDs so labeled 12-digit accounts become [REDACTED_ACCT].
+_LABELED_ACCT_RE = re.compile(
+    r"((?:account|acct|a/c)\s*(?:no\.?|number)?[:.\-\s]*)[0-9]{9,18}(?!\d)",
+    re.IGNORECASE,
+)
 # Match 13-18 digit sequences (contiguous or 4x4 spaced) before 12-digit UIDs so long IDs/VIDs aren't split.
 _LONG_ACCT_RE = re.compile(r"(?<!\d)(?:\d{13,18}|\d{4}(?:[\s-]\d{4}){3})(?!\d)")
 _UID_RE = re.compile(r"(?<!\d)\d{4}[\s-]?\d{4}[\s-]?\d{4}(?![\s-]?\d)")
@@ -12,11 +17,12 @@ _ACCT_RE = re.compile(r"(?<!\d)\d{11,18}(?!\d)")
 
 
 def redact_sensitive_text(text: str) -> str:
-    """Mask 12-digit UIDs, Indian PANs, and 11-18 digit bank account numbers."""
+    """Mask 12-digit UIDs, Indian PANs, and 11-18 digit (or labeled 9-18 digit) bank account numbers."""
     if not isinstance(text, str) or not text:
         return text
 
     redacted = _PAN_RE.sub("[REDACTED_PAN]", text)
+    redacted = _LABELED_ACCT_RE.sub(r"\1[REDACTED_ACCT]", redacted)
     redacted = _LONG_ACCT_RE.sub("[REDACTED_ACCT]", redacted)
     redacted = _UID_RE.sub("[REDACTED_UID]", redacted)
     redacted = _ACCT_RE.sub("[REDACTED_ACCT]", redacted)
