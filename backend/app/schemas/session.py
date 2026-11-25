@@ -35,7 +35,7 @@ class PortalSupportTier(str, Enum):
 
     VERIFIED_OFFICIAL = "verified_official"
     KNOWN_PORTAL = "known_portal"
-    BLOCKED_UNTRUSTED = "blocked_untrusted"
+    BLOCKED = "blocked"
 
 
 class SessionPortalContext(BaseModel):
