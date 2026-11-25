@@ -1,6 +1,7 @@
 """Common HTTP middleware for CORS, request ID propagation, and access logging."""
 
 import logging
+import re
 import time
 import uuid
 from typing import MutableMapping
@@ -13,6 +14,7 @@ from app.core.config import AppSettings
 from app.core.logging import request_id_ctx
 
 logger = logging.getLogger("app.request")
+_SAFE_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
 class RequestContextMiddleware:
@@ -58,8 +60,8 @@ class RequestContextMiddleware:
     def _extract_or_generate_request_id(scope: MutableMapping) -> str:
         for header_name, header_val in scope.get("headers", []):
             if header_name.lower() == b"x-request-id":
-                candidate = header_val.decode("latin-1").strip()
-                if candidate and len(candidate) <= 128:
+                candidate = header_val.decode("ascii", errors="ignore").strip()
+                if _SAFE_REQUEST_ID_RE.match(candidate):
                     return candidate
         return uuid.uuid4().hex[:16]
 

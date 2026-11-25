@@ -64,7 +64,7 @@ class AppSettings(BaseSettings):
             return "/api/v1"
         if not cleaned.startswith("/"):
             cleaned = f"/{cleaned}"
-        return cleaned.rstrip("/") or "/"
+        return cleaned.rstrip("/")
 
     @field_validator("cors_origins", mode="after")
     @classmethod

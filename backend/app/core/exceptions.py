@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from fastapi import FastAPI, Request, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -98,6 +99,14 @@ def _sanitize_value(value: Any) -> Any:
     return value
 
 
+def _error_headers(
+    request_id: str, extra_headers: dict[str, str] | None = None
+) -> dict[str, str]:
+    headers = dict(extra_headers) if extra_headers else {}
+    headers["X-Request-ID"] = request_id
+    return headers
+
+
 def _build_error_body(
     *,
     code: str,
@@ -114,10 +123,12 @@ def _build_error_body(
     if details is not None:
         error_obj["details"] = details
 
-    return {
-        "detail": detail if detail is not None else message,
-        "error": error_obj,
-    }
+    return jsonable_encoder(
+        {
+            "detail": detail if detail is not None else message,
+            "error": error_obj,
+        }
+    )
 
 
 def register_exception_handlers(app: FastAPI, settings: AppSettings) -> None:
@@ -127,9 +138,10 @@ def register_exception_handlers(app: FastAPI, settings: AppSettings) -> None:
     async def handle_app_error(request: Request, exc: AppError) -> JSONResponse:
         request_id = _get_request_id(request)
         safe_message = redact_sensitive_text(exc.message)
-        safe_details = _sanitize_value(exc.details)
+        safe_details = _sanitize_value(jsonable_encoder(exc.details))
         return JSONResponse(
             status_code=exc.status_code,
+            headers=_error_headers(request_id),
             content=_build_error_body(
                 code=exc.code,
                 message=safe_message,
@@ -144,7 +156,7 @@ def register_exception_handlers(app: FastAPI, settings: AppSettings) -> None:
         request: Request, exc: StarletteHTTPException
     ) -> JSONResponse:
         request_id = _get_request_id(request)
-        safe_detail = _sanitize_value(exc.detail)
+        safe_detail = _sanitize_value(jsonable_encoder(exc.detail))
         message = (
             safe_detail
             if isinstance(safe_detail, str)
@@ -152,7 +164,7 @@ def register_exception_handlers(app: FastAPI, settings: AppSettings) -> None:
         )
         return JSONResponse(
             status_code=exc.status_code,
-            headers=exc.headers,
+            headers=_error_headers(request_id, exc.headers),
             content=_build_error_body(
                 code=f"http_{exc.status_code}",
                 message=message,
@@ -166,9 +178,10 @@ def register_exception_handlers(app: FastAPI, settings: AppSettings) -> None:
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
         request_id = _get_request_id(request)
-        safe_errors = _sanitize_value(exc.errors())
+        safe_errors = _sanitize_value(jsonable_encoder(exc.errors()))
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            headers=_error_headers(request_id),
             content=_build_error_body(
                 code="validation_error",
                 message="Request validation failed.",
@@ -182,15 +195,20 @@ def register_exception_handlers(app: FastAPI, settings: AppSettings) -> None:
     async def handle_unexpected_error(request: Request, exc: Exception) -> JSONResponse:
         request_id = _get_request_id(request)
         safe_exc = redact_sensitive_text(str(exc))
-        logger.exception(
-            "Unhandled exception on %s %s: %s",
-            request.method,
-            request.url.path,
-            safe_exc,
-        )
+        token = request_id_ctx.set(request_id)
+        try:
+            logger.exception(
+                "Unhandled exception on %s %s: %s",
+                request.method,
+                request.url.path,
+                safe_exc,
+            )
+        finally:
+            request_id_ctx.reset(token)
         details = {"exception": safe_exc} if settings.expose_error_details else None
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            headers=_error_headers(request_id),
             content=_build_error_body(
                 code="internal_server_error",
                 message="An unexpected internal server error occurred.",
