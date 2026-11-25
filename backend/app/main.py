@@ -4,9 +4,11 @@ from sqlalchemy import select
 from app.database import get_db
 from app.models import ApprovedPortal
 from app.api.db_routes import router as db_router
-app.include_router(db_router)
-app = FastAPI(title="Universal AI Web Assistant API")
 
+app = FastAPI(title="Universal AI Web Assistant API")
+from backend.app.api.documents import router as documents_router
+app.include_router(documents_router)
+app.include_router(db_router)
 @app.get("/health/db")
 async def check_db(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(ApprovedPortal).where(ApprovedPortal.is_active == True))
