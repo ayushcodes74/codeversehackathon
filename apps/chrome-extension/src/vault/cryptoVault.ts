@@ -171,7 +171,7 @@ export async function decryptPayload(
   return new TextDecoder().decode(plainBuffer);
 }
 
-function parseVaultToken(token: VaultReferenceToken): {
+function parseVaultToken(token: string): {
   profileId: string;
   docType: DocumentType;
   fieldKey: string;
@@ -208,14 +208,21 @@ function idbTxComplete(tx: IDBTransaction): Promise<void> {
   });
 }
 
+export interface ResolveVaultTokenOptions {
+  allowUnverified?: boolean;
+  passphrase?: string;
+}
+
 /**
  * Encrypted on-device IndexedDB vault scoped by Family / Dependent profileId.
  */
 export class LocalEncryptedVault {
   private readonly dbName: string;
+  private readonly defaultPassphrase?: string;
 
-  constructor(dbName: string = DEFAULT_DB_NAME) {
+  constructor(dbName: string = DEFAULT_DB_NAME, defaultPassphrase?: string) {
     this.dbName = dbName;
+    this.defaultPassphrase = defaultPassphrase;
   }
 
   private openDb(): Promise<IDBDatabase> {
@@ -334,9 +341,21 @@ export class LocalEncryptedVault {
   }
 
   async resolveVaultToken(
-    token: VaultReferenceToken,
-    passphrase: string
+    token: VaultReferenceToken | string,
+    passphraseOrOptions?: string | ResolveVaultTokenOptions,
+    maybeOptions?: ResolveVaultTokenOptions
   ): Promise<string | null> {
+    const options: ResolveVaultTokenOptions | undefined =
+      typeof passphraseOrOptions === "string" ? maybeOptions : passphraseOrOptions;
+    const passphrase =
+      typeof passphraseOrOptions === "string"
+        ? passphraseOrOptions
+        : options?.passphrase ?? this.defaultPassphrase;
+
+    if (!passphrase) {
+      throw new Error("Vault passphrase is required to resolve token.");
+    }
+
     const { profileId, docType, fieldKey } = parseVaultToken(token);
     const db = await this.openDb();
     let candidates: StoredEncryptedRecordRow[] = [];
@@ -361,6 +380,11 @@ export class LocalEncryptedVault {
       const record = JSON.parse(decryptedJson) as LocalVaultDocumentRecord;
       const field = record.extractedFields?.[fieldKey];
       if (field && typeof field.value === "string" && field.value.length > 0) {
+        if (field.verifiedByUser === false && !options?.allowUnverified) {
+          throw new Error(
+            "Field requires explicit user verification before autofill (FR-037)."
+          );
+        }
         return field.value;
       }
     }

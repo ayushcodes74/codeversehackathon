@@ -216,7 +216,7 @@ async def verify_domain(
         return {
             "is_official": False,
             "canonical_domain": canonical_domain,
-            "support_tier": "blocked_untrusted",
+            "support_tier": "blocked",
             "reason": "Invalid or unparseable domain/URL.",
         }
 
@@ -226,7 +226,7 @@ async def verify_domain(
         return {
             "is_official": False,
             "canonical_domain": canonical_domain,
-            "support_tier": "blocked_untrusted",
+            "support_tier": "blocked",
             "reason": f"Punycode or non-ASCII homograph domain '{canonical_domain}' is blocked by Official Domain Shield.",
         }
 
@@ -237,37 +237,20 @@ async def verify_domain(
         )
     )
     portal = result.scalar_one_or_none()
-    has_official_suffix = canonical_domain.endswith(".gov.in") or canonical_domain.endswith(".nic.in")
-
-    if portal and has_official_suffix:
-        return {
-            "is_official": True,
-            "canonical_domain": canonical_domain,
-            "support_tier": "verified_official",
-            "reason": f"Verified official portal '{portal.portal_name}' in approved registry.",
-        }
-
     if portal:
+        is_gov_suffix = canonical_domain.endswith((".gov.in", ".nic.in"))
         return {
             "is_official": True,
             "canonical_domain": canonical_domain,
-            "support_tier": "known_portal",
-            "reason": f"Approved portal '{portal.portal_name}' found in registry.",
-        }
-
-    if has_official_suffix:
-        return {
-            "is_official": True,
-            "canonical_domain": canonical_domain,
-            "support_tier": "verified_official",
-            "reason": f"Official Indian government domain suffix verified for '{canonical_domain}'.",
+            "support_tier": "verified_official" if is_gov_suffix else "known_portal",
+            "reason": f"Verified portal '{portal.portal_name}' in approved_portals registry.",
         }
 
     return {
         "is_official": False,
         "canonical_domain": canonical_domain,
-        "support_tier": "blocked_untrusted",
-        "reason": f"Domain '{canonical_domain}' is neither an official .gov.in/.nic.in domain nor in the approved portal registry.",
+        "support_tier": "blocked",
+        "reason": f"Domain '{canonical_domain}' is not registered in the approved_portals registry.",
     }
 
 
