@@ -1,1 +1,95 @@
-# Schemas package
+"""Backend API request/response schemas for frontend-facing modules."""
+
+from app.schemas.clarification import (
+    ClarificationAnswerRequest,
+    ClarificationAnswerResponse,
+    ClarificationOption,
+    ClarificationPrompt,
+    ClarificationType,
+)
+from app.schemas.common import (
+    DocumentExtractionResult,
+    DocumentType,
+    FieldMappingItem,
+    FormFieldTarget,
+    MapFormFieldsResponse,
+    PaginationMeta,
+    PortalUploadConstraints,
+    ProfileScope,
+    ValidationReport,
+)
+from app.schemas.conversation import (
+    ConversationHistoryResponse,
+    ConversationMessageCreateRequest,
+    ConversationMessageResponse,
+    ConversationUiAction,
+    ConversationUiKind,
+    ConversationUiPayload,
+    MessageRole,
+)
+from app.schemas.goal import (
+    GoalPortalRecommendation,
+    GoalStepPreview,
+    GoalSubmitRequest,
+    GoalSubmitResponse,
+)
+from app.schemas.session import (
+    ClientType,
+    PortalSupportTier,
+    SessionCloseResponse,
+    SessionCreateRequest,
+    SessionPortalContext,
+    SessionResponse,
+    SessionStatus,
+    SessionUpdateRequest,
+)
+from app.schemas.task import (
+    TaskActionRequest,
+    TaskActionResponse,
+    TaskControlAction,
+    TaskDetailResponse,
+    TaskListResponse,
+    TaskSummaryResponse,
+)
+
+__all__ = [
+    "ClarificationAnswerRequest",
+    "ClarificationAnswerResponse",
+    "ClarificationOption",
+    "ClarificationPrompt",
+    "ClarificationType",
+    "ClientType",
+    "ConversationHistoryResponse",
+    "ConversationMessageCreateRequest",
+    "ConversationMessageResponse",
+    "ConversationUiAction",
+    "ConversationUiKind",
+    "ConversationUiPayload",
+    "DocumentExtractionResult",
+    "DocumentType",
+    "FieldMappingItem",
+    "FormFieldTarget",
+    "GoalPortalRecommendation",
+    "GoalStepPreview",
+    "GoalSubmitRequest",
+    "GoalSubmitResponse",
+    "MapFormFieldsResponse",
+    "MessageRole",
+    "PaginationMeta",
+    "PortalSupportTier",
+    "PortalUploadConstraints",
+    "ProfileScope",
+    "SessionCloseResponse",
+    "SessionCreateRequest",
+    "SessionPortalContext",
+    "SessionResponse",
+    "SessionStatus",
+    "SessionUpdateRequest",
+    "TaskActionRequest",
+    "TaskActionResponse",
+    "TaskControlAction",
+    "TaskDetailResponse",
+    "TaskListResponse",
+    "TaskSummaryResponse",
+    "ValidationReport",
+]
