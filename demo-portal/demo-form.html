@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>National Welfare & Scholarship Portal (Synthetic Demo Portal)</title>
+  <style>
+    :root {
+      --primary: #1a56db;
+      --primary-hover: #1e429f;
+      --surface: #ffffff;
+      --bg: #f3f4f6;
+      --text: #111827;
+      --text-muted: #6b7280;
+      --border: #d1d5db;
+      --success: #059669;
+      --warning: #d97706;
+      --danger: #dc2626;
+      --radius: 8px;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      padding: 24px;
+    }
+
+    .container {
+      max-width: 820px;
+      margin: 0 auto;
+      background: var(--surface);
+      border-radius: var(--radius);
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+      overflow: hidden;
+    }
+
+    .header {
+      background: linear-gradient(135deg, #1e3a8a, #1a56db);
+      color: white;
+      padding: 24px;
+      border-bottom: 3px solid #f59e0b;
+    }
+
+    .header h1 {
+      font-size: 22px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    .header p {
+      font-size: 14px;
+      opacity: 0.9;
+    }
+
+    .stepper {
+      display: flex;
+      background: #f9fafb;
+      border-bottom: 1px solid var(--border);
+      padding: 12px 24px;
+    }
+
+    .step-item {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-muted);
+    }
+
+    .step-item.active {
+      color: var(--primary);
+    }
+
+    .step-item.completed {
+      color: var(--success);
+    }
+
+    .step-badge {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: #e5e7eb;
+      color: var(--text-muted);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      margin-right: 8px;
+      font-size: 12px;
+    }
+
+    .step-item.active .step-badge {
+      background: var(--primary);
+      color: white;
+    }
+
+    .step-item.completed .step-badge {
+      background: var(--success);
+      color: white;
+    }
+
+    .form-body {
+      padding: 28px 24px;
+    }
+
+    .step-title-container {
+      margin-bottom: 20px;
+      border-bottom: 1px solid #e5e7eb;
+      padding-bottom: 10px;
+    }
+
+    .step-title-container h2 {
+      font-size: 18px;
+      color: var(--text);
+    }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 16px;
+    }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .form-group.full-width {
+      grid-column: span 2;
+    }
+
+    label {
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 6px;
+      color: #374151;
+    }
+
+    label .req {
+      color: var(--danger);
+    }
+
+    input, select, textarea {
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: 14px;
+      color: var(--text);
+      outline: none;
+      transition: border-color 0.15s ease-in-out;
+    }
+
+    input:focus, select:focus, textarea:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 3px rgba(26, 86, 219, 0.15);
+    }
+
+    .badge-sensitive {
+      display: inline-block;
+      font-size: 10px;
+      background: #fee2e2;
+      color: #991b1b;
+      padding: 2px 6px;
+      border-radius: 4px;
+      margin-left: 6px;
+      font-weight: 700;
+    }
+
+    .actions {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 28px;
+      padding-top: 20px;
+      border-top: 1px solid #e5e7eb;
+    }
+
+    button {
+      padding: 10px 20px;
+      border-radius: 6px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      border: none;
+      transition: background 0.15s ease;
+    }
+
+    .btn-secondary {
+      background: #e5e7eb;
+      color: #374151;
+    }
+
+    .btn-secondary:hover {
+      background: #d1d5db;
+    }
+
+    .btn-primary {
+      background: var(--primary);
+      color: white;
+    }
+
+    .btn-primary:hover {
+      background: var(--primary-hover);
+    }
+
+    .btn-success {
+      background: var(--success);
+      color: white;
+    }
+
+    .btn-success:hover {
+      background: #047857;
+    }
+
+    /* Review Table */
+    .review-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-bottom: 20px;
+    }
+
+    .review-table th, .review-table td {
+      padding: 10px 12px;
+      border-bottom: 1px solid #e5e7eb;
+      font-size: 14px;
+      text-align: left;
+    }
+
+    .review-table th {
+      background: #f9fafb;
+      color: #4b5563;
+      width: 35%;
+    }
+
+    /* Receipt Screen */
+    .receipt-screen {
+      text-align: center;
+      padding: 30px 20px;
+    }
+
+    .receipt-icon {
+      width: 64px;
+      height: 64px;
+      background: #d1fae5;
+      color: var(--success);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 16px;
+      font-size: 32px;
+    }
+
+    .receipt-box {
+      background: #f8fafc;
+      border: 1px dashed #cbd5e1;
+      border-radius: 8px;
+      padding: 20px;
+      max-width: 480px;
+      margin: 20px auto;
+      text-align: left;
+    }
+
+    .receipt-row {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 8px;
+      font-size: 14px;
+    }
+
+    .receipt-label {
+      color: var(--text-muted);
+    }
+
+    .receipt-val {
+      font-weight: 700;
+      color: var(--text);
+    }
+
+    .ref-highlight {
+      font-size: 18px;
+      color: var(--primary);
+      letter-spacing: 1px;
+    }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <div class="header">
+    <h1>National Post-Matric Scholarship Portal</h1>
+    <p>Ministry of Social Justice & Empowerment | Government of India (Synthetic Test Portal)</p>
+  </div>
+
+  <!-- Stepper -->
+  <div class="stepper" id="stepper">
+    <div class="step-item active" id="step-nav-1">
+      <span class="step-badge">1</span> Personal Details
+    </div>
+    <div class="step-item" id="step-nav-2">
+      <span class="step-badge">2</span> Address Info
+    </div>
+    <div class="step-item" id="step-nav-3">
+      <span class="step-badge">3</span> Documents & Bank
+    </div>
+    <div class="step-item" id="step-nav-4">
+      <span class="step-badge">4</span> Review & Submit
+    </div>
+  </div>
+
+  <div class="form-body">
+    <!-- STEP 1: Personal Details -->
+    <div id="step-1" class="step-content">
+      <div class="step-title-container">
+        <h2 id="step-heading-1">Step 1 of 4: Personal Details</h2>
+      </div>
+      <div class="form-grid">
+        <div class="form-group">
+          <label for="fullName">Full Name (as per Aadhaar) <span class="req">*</span></label>
+          <input type="text" id="fullName" name="fullName" placeholder="Enter full name" required>
+        </div>
+        <div class="form-group">
+          <label for="dob">Date of Birth <span class="req">*</span></label>
+          <input type="date" id="dob" name="dob" required>
+        </div>
+        <div class="form-group">
+          <label for="gender">Gender <span class="req">*</span></label>
+          <select id="gender" name="gender" required>
+            <option value="">Select Gender</option>
+            <option value="Male">Male</option>
+            <option value="Female">Female</option>
+            <option value="Other">Other</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="mobileNo">Mobile Number <span class="req">*</span></label>
+          <input type="tel" id="mobileNo" name="mobileNo" placeholder="10-digit mobile number" required>
+        </div>
+        <div class="form-group">
+          <label for="panNumber">PAN Number <span class="badge-sensitive">Sensitive</span></label>
+          <input type="text" id="panNumber" name="panNumber" placeholder="ABCDE1234F" maxlength="10">
+        </div>
+        <div class="form-group">
+          <label for="aadhaarNumber">Aadhaar Number <span class="req">*</span> <span class="badge-sensitive">Sensitive</span></label>
+          <input type="text" id="aadhaarNumber" name="aadhaarNumber" placeholder="12-digit UID" maxlength="14" required>
+        </div>
+      </div>
+      <div class="actions">
+        <div></div>
+        <button type="button" class="btn-primary" id="btn-next-1" onclick="goToStep(2)">Save & Continue to Address &rarr;</button>
+      </div>
+    </div>
+
+    <!-- STEP 2: Address Information -->
+    <div id="step-2" class="step-content" style="display: none;">
+      <div class="step-title-container">
+        <h2 id="step-heading-2">Step 2 of 4: Address Information</h2>
+      </div>
+      <div class="form-grid">
+        <div class="form-group full-width">
+          <label for="addressLine">Communication Address <span class="req">*</span></label>
+          <input type="text" id="addressLine" name="addressLine" placeholder="House/Flat No, Street, Landmark" required>
+        </div>
+        <div class="form-group">
+          <label for="domicileState">Domicile State <span class="req">*</span></label>
+          <select id="domicileState" name="domicileState" required>
+            <option value="">Select State</option>
+            <option value="Karnataka">Karnataka</option>
+            <option value="Maharashtra">Maharashtra</option>
+            <option value="Uttar Pradesh">Uttar Pradesh</option>
+            <option value="Delhi">Delhi</option>
+            <option value="Tamil Nadu">Tamil Nadu</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="pincode">Postal Pincode <span class="req">*</span></label>
+          <input type="text" id="pincode" name="pincode" placeholder="6-digit pincode" maxlength="6" required>
+        </div>
+      </div>
+      <div class="actions">
+        <button type="button" class="btn-secondary" onclick="goToStep(1)">&larr; Back to Personal</button>
+        <button type="button" class="btn-primary" id="btn-next-2" onclick="goToStep(3)">Save & Continue to Bank Details &rarr;</button>
+      </div>
+    </div>
+
+    <!-- STEP 3: Document & Bank Details -->
+    <div id="step-3" class="step-content" style="display: none;">
+      <div class="step-title-container">
+        <h2 id="step-heading-3">Step 3 of 4: Document & Bank Details</h2>
+      </div>
+      <div class="form-grid">
+        <div class="form-group">
+          <label for="bankName">Bank Name <span class="req">*</span></label>
+          <input type="text" id="bankName" name="bankName" placeholder="e.g. State Bank of India" required>
+        </div>
+        <div class="form-group">
+          <label for="accountNumber">Bank Account Number <span class="req">*</span> <span class="badge-sensitive">Sensitive</span></label>
+          <input type="text" id="accountNumber" name="accountNumber" placeholder="9 to 18 digits" required>
+        </div>
+        <div class="form-group">
+          <label for="ifscCode">Branch IFSC Code <span class="req">*</span></label>
+          <input type="text" id="ifscCode" name="ifscCode" placeholder="11-character IFSC (e.g. SBIN0001234)" maxlength="11" required>
+        </div>
+        <div class="form-group">
+          <label for="incomeCertNo">Income Certificate / RD No <span class="req">*</span></label>
+          <input type="text" id="incomeCertNo" name="incomeCertNo" placeholder="e.g. RD0038291048" required>
+        </div>
+      </div>
+      <div class="actions">
+        <button type="button" class="btn-secondary" onclick="goToStep(2)">&larr; Back to Address</button>
+        <button type="button" class="btn-primary" id="btn-next-3" onclick="goToStep(4)">Review & Final Submit &rarr;</button>
+      </div>
+    </div>
+
+    <!-- STEP 4: Review & Submit -->
+    <div id="step-4" class="step-content" style="display: none;">
+      <div class="step-title-container">
+        <h2 id="step-heading-4">Step 4 of 4: Review & Submit</h2>
+      </div>
+      <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 16px;">
+        Please review your filled application details. Antigravity AI Web Assistant requires your confirmation before final submission.
+      </p>
+
+      <table class="review-table">
+        <tbody>
+          <tr><th>Applicant Full Name</th><td id="rev-fullName">-</td></tr>
+          <tr><th>Date of Birth</th><td id="rev-dob">-</td></tr>
+          <tr><th>Gender / Mobile</th><td id="rev-genderMobile">-</td></tr>
+          <tr><th>Aadhaar / PAN</th><td id="rev-ids">Masked for Security</td></tr>
+          <tr><th>Domicile Address</th><td id="rev-address">-</td></tr>
+          <tr><th>Bank Account & IFSC</th><td id="rev-bank">-</td></tr>
+          <tr><th>Income Certificate</th><td id="rev-income">-</td></tr>
+        </tbody>
+      </table>
+
+      <div class="actions">
+        <button type="button" class="btn-secondary" onclick="goToStep(3)">&larr; Back to Edit</button>
+        <button type="button" class="btn-success" id="btn-final-submit" onclick="submitApplication()">Confirm and Submit Application</button>
+      </div>
+    </div>
+
+    <!-- STEP 5: Acknowledgement Receipt -->
+    <div id="step-receipt" class="step-content" style="display: none;">
+      <div class="receipt-screen">
+        <div class="receipt-icon">&#10003;</div>
+        <h2 style="font-size: 22px; color: var(--success); margin-bottom: 8px;">Application Submitted Successfully!</h2>
+        <p style="color: var(--text-muted); font-size: 14px;">Your scholarship application has been registered with the central registry.</p>
+
+        <div class="receipt-box" id="acknowledgement-receipt">
+          <div class="receipt-row">
+            <span class="receipt-label">Application Reference No:</span>
+            <span class="receipt-val ref-highlight" id="receipt-ref-no">APP-2026-88412</span>
+          </div>
+          <div class="receipt-row">
+            <span class="receipt-label">Applicant Name:</span>
+            <span class="receipt-val" id="receipt-name">-</span>
+          </div>
+          <div class="receipt-row">
+            <span class="receipt-label">Scheme Name:</span>
+            <span class="receipt-val">Post-Matric Central Merit Scholarship</span>
+          </div>
+          <div class="receipt-row">
+            <span class="receipt-label">Submission Date & Time:</span>
+            <span class="receipt-val" id="receipt-time">25-Nov-2026 22:50 IST</span>
+          </div>
+          <div class="receipt-row">
+            <span class="receipt-label">Verification Status:</span>
+            <span class="receipt-val" style="color: var(--warning);">Pending Institute Verification</span>
+          </div>
+        </div>
+
+        <button type="button" class="btn-primary" onclick="window.print()">Download / Print Acknowledgment Receipt</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  // Controlled Form State
+  const formData = {
+    fullName: "",
+    dob: "",
+    gender: "",
+    mobileNo: "",
+    panNumber: "",
+    aadhaarNumber: "",
+    addressLine: "",
+    domicileState: "",
+    pincode: "",
+    bankName: "",
+    accountNumber: "",
+    ifscCode: "",
+    incomeCertNo: ""
+  };
+
+  // Controlled input event listeners (simulating React controlled inputs)
+  document.querySelectorAll("input, select, textarea").forEach(el => {
+    el.addEventListener("input", (e) => {
+      formData[e.target.name] = e.target.value;
+    });
+    el.addEventListener("change", (e) => {
+      formData[e.target.name] = e.target.value;
+    });
+  });
+
+  function goToStep(stepNum) {
+    // Hide all steps
+    document.querySelectorAll(".step-content").forEach(el => el.style.display = "none");
+    document.getElementById(`step-${stepNum}`).style.display = "block";
+
+    // Update stepper styling
+    for (let i = 1; i <= 4; i++) {
+      const navItem = document.getElementById(`step-nav-${i}`);
+      navItem.classList.remove("active", "completed");
+      if (i === stepNum) {
+        navItem.classList.add("active");
+      } else if (i < stepNum) {
+        navItem.classList.add("completed");
+      }
+    }
+
+    if (stepNum === 4) {
+      populateReview();
+    }
+  }
+
+  function maskValue(val, keepLast = 4) {
+    if (!val) return "[Not Provided]";
+    if (val.length <= keepLast) return val;
+    return "X".repeat(val.length - keepLast) + val.slice(-keepLast);
+  }
+
+  function populateReview() {
+    document.getElementById("rev-fullName").textContent = formData.fullName || document.getElementById("fullName").value || "-";
+    document.getElementById("rev-dob").textContent = formData.dob || document.getElementById("dob").value || "-";
+    const g = formData.gender || document.getElementById("gender").value || "-";
+    const m = formData.mobileNo || document.getElementById("mobileNo").value || "-";
+    document.getElementById("rev-genderMobile").textContent = `${g} | ${m}`;
+
+    const aadhaar = formData.aadhaarNumber || document.getElementById("aadhaarNumber").value;
+    const pan = formData.panNumber || document.getElementById("panNumber").value;
+    document.getElementById("rev-ids").textContent = `Aadhaar: ${maskValue(aadhaar)} | PAN: ${maskValue(pan)}`;
+
+    const addr = formData.addressLine || document.getElementById("addressLine").value;
+    const state = formData.domicileState || document.getElementById("domicileState").value;
+    const pin = formData.pincode || document.getElementById("pincode").value;
+    document.getElementById("rev-address").textContent = `${addr}, ${state} - ${pin}`;
+
+    const bName = formData.bankName || document.getElementById("bankName").value;
+    const acc = formData.accountNumber || document.getElementById("accountNumber").value;
+    const ifsc = formData.ifscCode || document.getElementById("ifscCode").value;
+    document.getElementById("rev-bank").textContent = `${bName} (A/C: ${maskValue(acc)}) | IFSC: ${ifsc}`;
+
+    const inc = formData.incomeCertNo || document.getElementById("incomeCertNo").value;
+    document.getElementById("rev-income").textContent = inc || "-";
+  }
+
+  function submitApplication() {
+    // Hide steps and stepper
+    document.querySelectorAll(".step-content").forEach(el => el.style.display = "none");
+    document.getElementById("stepper").style.display = "none";
+    document.getElementById("step-receipt").style.display = "block";
+
+    const applicantName = formData.fullName || document.getElementById("fullName").value || "Ayush Kumar";
+    document.getElementById("receipt-name").textContent = applicantName;
+    document.getElementById("receipt-time").textContent = new Date().toLocaleString();
+  }
+</script>
+</body>
+</html>
