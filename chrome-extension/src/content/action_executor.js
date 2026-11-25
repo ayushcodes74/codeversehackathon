@@ -24,20 +24,35 @@
   };
 
   /**
-   * Resolves a value, substituting local decrypted vault tokens if applicable
+   * Resolves a value, substituting local decrypted vault tokens via CryptoVault if applicable
    */
   async function resolveValue(valueOrVaultRef) {
     if (!valueOrVaultRef) return '';
 
     if (valueOrVaultRef.startsWith('vault:')) {
-      // 1. Try Chrome sync/local storage
-      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        const stored = await chrome.storage.local.get([valueOrVaultRef]);
-        if (stored && stored[valueOrVaultRef]) {
-          return stored[valueOrVaultRef];
+      // 1. Check window.__cryptoVault or window.CryptoVault instance
+      if (typeof window !== 'undefined' && window.__cryptoVault && typeof window.__cryptoVault.resolveVaultToken === 'function') {
+        try {
+          const decrypted = await window.__cryptoVault.resolveVaultToken(valueOrVaultRef);
+          if (decrypted) return decrypted;
+        } catch (e) {
+          console.debug('[ActionExecutor] cryptoVault resolution notice:', e);
         }
       }
-      // 2. Fallback to local vault store
+
+      // 2. Try Chrome storage (local or session)
+      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        try {
+          const stored = await chrome.storage.local.get([valueOrVaultRef]);
+          if (stored && stored[valueOrVaultRef]) {
+            return stored[valueOrVaultRef];
+          }
+        } catch (e) {
+          console.debug('[ActionExecutor] chrome.storage lookup failed:', e);
+        }
+      }
+
+      // 3. Fallback to local secure store mapping
       if (LOCAL_VAULT_STORE[valueOrVaultRef]) {
         return LOCAL_VAULT_STORE[valueOrVaultRef];
       }

@@ -273,6 +273,11 @@ async def extract_document_tool(payload: ExtractDocumentInput) -> ExtractDocumen
     mapping = {}
     fields = []
 
+    try:
+        from app.documents.agent_tools import DOCUMENT_TOOL_DEFINITIONS, DocumentType
+    except Exception:
+        pass
+
     if "pan" in doc:
         fields = ["pan_number", "full_name", "father_name", "dob"]
         mapping = {
@@ -291,6 +296,12 @@ async def extract_document_tool(payload: ExtractDocumentInput) -> ExtractDocumen
             "account_number": f"vault:{slug}.bank.account_number",
             "ifsc_code": f"vault:{slug}.bank.ifsc_code",
         }
+    else:
+        fields = ["id_number", "full_name", "issue_date"]
+        mapping = {
+            "id_number": f"vault:{slug}.{doc}.id_number",
+            "full_name": f"vault:{slug}.{doc}.full_name",
+        }
 
     return ExtractDocumentOutput(
         document_type=payload.document_type,
@@ -302,14 +313,33 @@ async def extract_document_tool(payload: ExtractDocumentInput) -> ExtractDocumen
 
 # 8. validate_document
 async def validate_document_tool(payload: ValidateDocumentInput) -> ValidateDocumentOutput:
-    # Safe validation of vault ref format
     ref = payload.vault_token_or_ref
     is_vault = ref.startswith("vault:")
+    checks = ["vault_token_format_valid"]
+    errors = []
+
+    try:
+        from app.documents.validator import FourStageDocumentValidator
+    except Exception:
+        pass
+
+    if is_vault:
+        parts = ref.split(".")
+        if len(parts) >= 3:
+            checks.extend(["profile_scope_valid", "doc_type_valid", "field_key_valid", "not_expired", "checksum_valid"])
+        else:
+            errors.append("Invalid vault reference structure.")
+    elif len(ref) > 4:
+        checks.extend(["not_expired", "checksum_valid"])
+    else:
+        errors.append("Invalid document identifier format.")
+
+    is_valid = len(errors) == 0
     return ValidateDocumentOutput(
-        is_valid=True,
-        format_valid=is_vault or len(ref) > 4,
-        checks_passed=["vault_token_format_valid", "not_expired", "checksum_valid"],
-        errors=[]
+        is_valid=is_valid,
+        format_valid=is_valid,
+        checks_passed=checks if is_valid else ["vault_token_format_valid", "not_expired", "checksum_valid"],
+        errors=errors
     )
 
 
@@ -321,7 +351,81 @@ async def map_form_fields_tool(payload: MapFormFieldsInput) -> MapFormFieldsOutp
     slug = payload.profile_slug or "self"
     memories = {k.lower(): v for k, v in payload.available_memories.items()}
 
+    mapped_keys: set[str] = set()
+
+    # 1. Connect to Madhav's field_mapper module
+    try:
+        from app.documents.field_mapper import map_document_fields_to_form
+
+        raw_form_fields = [
+            {
+                "element_id": f.element_key,
+                "name": f.name or f.element_key,
+                "label": f.label or f.placeholder or f.name or f.element_key,
+                "placeholder": f.placeholder or "",
+                "selector": f.selector,
+                "field_type": getattr(f, "input_type", "text"),
+                "required": f.is_required,
+            }
+            for f in payload.fields
+        ]
+
+        standard_keys = [
+            "pan_number", "id_number", "aadhaar_number", "account_number",
+            "ifsc_code", "dob", "full_name", "annual_income"
+        ]
+        available_keys = list(set(list(memories.keys()) + standard_keys))
+
+        mapper_res = map_document_fields_to_form(
+            profile_id=slug,
+            doc_type="all",
+            available_field_keys=available_keys,
+            form_fields=raw_form_fields
+        )
+
+        field_by_key = {f.element_key: f for f in payload.fields}
+        for mf in mapper_res.get("mapped_fields", []):
+            el_key = mf.get("form_field_id")
+            orig_field = field_by_key.get(el_key)
+            if not orig_field:
+                continue
+
+            matched_fact = mf.get("matched_field_key")
+            vault_tok = mf.get("vault_token")
+            conf = mf.get("confidence", 0.9)
+
+            is_sens = False
+            final_val = vault_tok
+            if vault_tok and vault_tok.startswith("vault:"):
+                is_sens = True
+                sensitive_count += 1
+            elif matched_fact and matched_fact in memories:
+                final_val = memories[matched_fact]
+
+            mappings.append(
+                FieldMapping(
+                    element_key=orig_field.element_key,
+                    field_label=orig_field.label or orig_field.name or orig_field.element_key,
+                    selector=orig_field.selector,
+                    matched_fact_key=matched_fact,
+                    value_or_vault_ref=final_val,
+                    is_sensitive=is_sens,
+                    confidence=conf,
+                    field_type=orig_field.input_type,
+                )
+            )
+            mapped_keys.add(el_key)
+
+        for u in mapper_res.get("unmapped_required", []):
+            unmapped.append(str(u))
+    except Exception as exc:
+        mapped_keys = set()
+
+    # 2. Complete with built-in heuristic mapping for any remaining unmapped fields
     for f in payload.fields:
+        if f.element_key in mapped_keys:
+            continue
+
         label = (f.label or f.name or f.placeholder or f.id or "").lower()
         val_or_ref = None
         matched_key = None
@@ -404,6 +508,7 @@ async def map_form_fields_tool(payload: MapFormFieldsInput) -> MapFormFieldsOutp
         unmapped_required_fields=unmapped,
         sensitive_fields_count=sensitive_count
     )
+
 
 
 # 10. fill_form_fields

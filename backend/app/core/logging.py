@@ -16,31 +16,40 @@ class RequestIdLogFilter(logging.Filter):
         return True
 
 
+class SafeRequestIdFormatter(logging.Formatter):
+    """Formatter ensuring request_id is always present on every log record."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        if not hasattr(record, "request_id"):
+            record.request_id = request_id_ctx.get()
+        return super().format(record)
+
+
 def configure_logging(log_level: str = "INFO") -> None:
     """Configure application logging level, format, request ID filter, and PII redaction."""
     level = getattr(logging, log_level.upper(), logging.INFO)
     root_logger = logging.getLogger()
     root_logger.setLevel(level)
 
+    req_filter = RequestIdLogFilter()
+    formatter = SafeRequestIdFormatter(
+        "%(asctime)s | %(levelname)s | %(name)s | req=%(request_id)s | %(message)s"
+    )
+
     if not root_logger.handlers:
         handler = logging.StreamHandler()
-        handler.setFormatter(
-            logging.Formatter(
-                "%(asctime)s | %(levelname)s | %(name)s | req=%(request_id)s | %(message)s"
-            )
-        )
+        handler.addFilter(req_filter)
+        handler.setFormatter(formatter)
         root_logger.addHandler(handler)
     else:
         for handler in root_logger.handlers:
+            if not any(isinstance(f, RequestIdLogFilter) for f in handler.filters):
+                handler.addFilter(req_filter)
             if handler.formatter is None:
-                handler.setFormatter(
-                    logging.Formatter(
-                        "%(asctime)s | %(levelname)s | %(name)s | req=%(request_id)s | %(message)s"
-                    )
-                )
+                handler.setFormatter(formatter)
 
     if not any(isinstance(f, RequestIdLogFilter) for f in root_logger.filters):
-        root_logger.addFilter(RequestIdLogFilter())
+        root_logger.addFilter(req_filter)
 
     # Ensure existing PII redaction filter stays attached to root, FastAPI, and Uvicorn loggers.
     install_log_redaction()

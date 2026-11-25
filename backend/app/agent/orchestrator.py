@@ -40,6 +40,50 @@ from app.agent.tool_registry import (
     capture_receipt_tool,
     audit_log_tool_call,
 )
+from app.llm.client import get_llm_client, UnconfiguredLLMClient
+from app.llm.types import LLMRequest
+from app.llm.exceptions import LLMError, LLMNotConfiguredError
+
+
+async def enhance_with_llm(
+    user_msg: str,
+    default_msg_en: str,
+    default_msg_hi: str,
+    language: str = "en",
+    context: str = ""
+) -> tuple[str, str]:
+    """Uses Anubhav's LLM client to refine natural-language bilingual responses when configured,
+    gracefully falling back to rule-based templates if no provider or API key is set."""
+    try:
+        llm = get_llm_client()
+        if isinstance(llm, UnconfiguredLLMClient):
+            return default_msg_en, default_msg_hi
+
+        prompt = (
+            f"You are an assistant for Indian government portal automation.\n"
+            f"User message: {user_msg}\n"
+            f"Context: {context}\n"
+            f"Respond with a clear, concise instruction in English and Hindi.\n"
+            f"Format as: EN: <english_text> | HI: <hindi_text>"
+        )
+        resp = await llm.generate(
+            LLMRequest(
+                prompt=prompt,
+                system_instruction="You are an empathetic, bilingual web automation assistant.",
+                temperature=0.2,
+                timeout_seconds=5.0
+            )
+        )
+        raw = resp.raw_text.strip()
+        if "EN:" in raw and "HI:" in raw:
+            parts = raw.split("HI:", 1)
+            en_part = parts[0].replace("EN:", "").strip().rstrip("|").strip()
+            hi_part = parts[1].strip()
+            return en_part or default_msg_en, hi_part or default_msg_hi
+    except (LLMNotConfiguredError, LLMError, Exception):
+        pass
+
+    return default_msg_en, default_msg_hi
 
 
 async def get_or_create_task(
@@ -253,12 +297,19 @@ async def execute_agent_turn(
                 status="in_progress"
             )
 
+        ready_en, ready_hi = await enhance_with_llm(
+            user_msg=user_msg,
+            default_msg_en="Ready. Please open the portal or provide the page URL.",
+            default_msg_hi="तैयार। कृपया पोर्टल खोलें या पेज URL प्रदान करें।",
+            language=lang,
+            context="Initial portal navigation state"
+        )
         return AgentStepResponse(
             task_id=task.id,
             response_type="action",
             intent_lane="form_automation",
-            message="Ready. Please open the portal or provide the page URL.",
-            message_hi="तैयार। कृपया पोर्टल खोलें या पेज URL प्रदान करें।",
+            message=ready_hi if lang == "hi" else ready_en,
+            message_hi=ready_hi,
             status="in_progress"
         )
 

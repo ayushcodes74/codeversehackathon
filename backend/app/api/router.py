@@ -2,6 +2,7 @@
 
 from fastapi import FastAPI
 
+from app.api.agent_routes import router as agent_router
 from app.api.db_routes import router as db_router
 from app.api.documents import router as documents_router
 from app.api.health import router as health_router
@@ -22,6 +23,8 @@ def register_routers(app: FastAPI, settings: AppSettings) -> None:
     app.include_router(db_router)
     app.include_router(documents_router)
 
-    # Extension point for future v1 feature routers:
-    # e.g. app.include_router(agent_router, prefix=settings.api_v1_prefix)
+    # Agent Orchestrator & Browser Automation router (already includes /api/v1/agent prefix)
+    app.include_router(agent_router)
+
     _ = settings.api_v1_prefix
+
