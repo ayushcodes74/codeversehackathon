@@ -5,3 +5,4 @@ __pycache__/
 backend/.env
 .pytest_cache/
 .vscode/
+tests/
