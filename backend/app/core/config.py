@@ -30,6 +30,7 @@ class AppSettings(BaseSettings):
     include_error_details: bool = False
     jwt_secret_key: SecretStr | None = None
     allow_dev_user_header: bool = False
+    allow_local_dev_portals: bool = True
 
     cors_origins: str | list[str] = Field(
         default_factory=lambda: [
@@ -92,6 +93,11 @@ class AppSettings(BaseSettings):
     def is_production(self) -> bool:
         """Return True when running in production mode."""
         return self.app_env == "production"
+
+    @property
+    def local_dev_portals_allowed(self) -> bool:
+        """Return True when local dev portals (localhost, 127.0.0.1, file://) are permitted."""
+        return self.allow_local_dev_portals and not self.is_production
 
     @property
     def expose_error_details(self) -> bool:

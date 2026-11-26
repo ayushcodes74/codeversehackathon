@@ -79,12 +79,41 @@ async def test_official_domain_shield():
         assert res_official.is_allowed is True
         assert res_official.shield_status == "VERIFIED_OFFICIAL"
 
-        # 2. Local dev synthetic demo -> ALLOWED
+        # 2. Local dev synthetic demo (localhost & 127.0.0.1 any port) -> ALLOWED
         res_local = await check_domain_shield("http://localhost:8000/demo-form.html", session)
         assert res_local.is_allowed is True
         assert res_local.shield_status == "LOCAL_DEV_ALLOWED"
 
-        # 3. Phishing / Lookalike domain -> BLOCKED
+        res_127 = await check_domain_shield("http://127.0.0.1:5500/demo-portal/demo-form.html", session)
+        assert res_127.is_allowed is True
+        assert res_127.shield_status == "LOCAL_DEV_ALLOWED"
+
+        # 2b. file:// in dev mode vs production mode
+        from app.core.config import get_settings
+        settings = get_settings()
+        orig_allow_local = settings.allow_local_dev_portals
+        orig_env = settings.app_env
+        try:
+            settings.allow_local_dev_portals = True
+            settings.app_env = "development"
+            res_file_dev = await check_domain_shield("file:///D:/codeversehackathon/demo-portal/demo-form.html", session)
+            assert res_file_dev.is_allowed is True
+            assert res_file_dev.shield_status == "LOCAL_DEV_ALLOWED"
+
+            settings.app_env = "production"
+            res_file_prod = await check_domain_shield("file:///D:/codeversehackathon/demo-portal/demo-form.html", session)
+            assert res_file_prod.is_allowed is False
+            assert res_file_prod.shield_status == "BLOCKED_UNOFFICIAL"
+            assert "python -m http.server 5500" in (res_file_prod.warning or "")
+        finally:
+            settings.allow_local_dev_portals = orig_allow_local
+            settings.app_env = orig_env
+
+        # 3. Arbitrary untrusted HTTP & Phishing / Lookalike domain -> BLOCKED
+        res_http_ext = await check_domain_shield("http://untrusted-external-portal.com/login", session)
+        assert res_http_ext.is_allowed is False
+        assert res_http_ext.shield_status == "BLOCKED_UNOFFICIAL"
+
         res_fake = await check_domain_shield("https://scholarships-gov-portal-fake.com", session)
         assert res_fake.is_allowed is False
         assert res_fake.shield_status == "BLOCKED_UNOFFICIAL"
