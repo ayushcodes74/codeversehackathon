@@ -4,9 +4,9 @@
   "version": "3.0.0",
   "description": "Zero-Leak Hybrid AI Web Assistant & Browser Automation Layer",
   "permissions": [
-    "storage",
     "activeTab",
     "scripting",
+    "storage",
     "sidePanel"
   ],
   "host_permissions": [
@@ -24,7 +24,7 @@
     "default_path": "sidepanel.html"
   },
   "action": {
-    "default_title": "Universal AI Web Assistant"
+    "default_title": "Open Universal AI Web Assistant"
   },
   "content_scripts": [
     {
