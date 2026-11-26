@@ -4,7 +4,6 @@ import base64
 import hashlib
 import hmac
 import json
-import os
 import time
 import uuid
 from enum import Enum
@@ -17,7 +16,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db, settings
+from app.core.config import get_settings
+from app.database import get_db
 from app.models import (
     AgentMemory,
     ApprovedPortal,
@@ -178,19 +178,23 @@ ALLOWED_STATE_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
 
 
 def _get_jwt_secret() -> str:
-    return getattr(settings, "secret_key", None) or os.getenv(
-        "JWT_SECRET_KEY", "dev-local-secret-change-in-prod"
-    )
+    app_settings = get_settings()
+    if app_settings.jwt_secret_key is not None:
+        secret = app_settings.jwt_secret_key.get_secret_value().strip()
+        if secret:
+            return secret
+    return "local-dev-jwt-secret-key-at-least-32-bytes-long-2026"
 
 
 def _is_production_env() -> bool:
-    return os.getenv("ENV", "development").strip().lower() == "production"
+    app_settings = get_settings()
+    return bool(app_settings.is_production)
 
 
 def _allow_dev_user_header() -> bool:
     if _is_production_env():
         return False
-    return os.getenv("ALLOW_DEV_USER_HEADER", "true").strip().lower() == "true"
+    return bool(get_settings().allow_dev_user_header)
 
 
 def _b64url_encode(raw: bytes) -> str:
@@ -577,7 +581,23 @@ async def verify_domain(
         raise HTTPException(status_code=422, detail="Query parameter 'domain' or 'url' is required.")
 
     canonical_domain = _extract_canonical_hostname(raw_target)
-    if not canonical_domain or "." not in canonical_domain:
+    if not canonical_domain:
+        return {
+            "is_official": False,
+            "canonical_domain": canonical_domain,
+            "support_tier": "blocked",
+            "reason": "Invalid or unparseable domain/URL.",
+        }
+
+    if canonical_domain in ("localhost", "127.0.0.1") and not get_settings().is_production:
+        return {
+            "is_official": True,
+            "canonical_domain": canonical_domain,
+            "support_tier": "local_demo",
+            "reason": f"Local development host '{canonical_domain}' allowed in non-production environment.",
+        }
+
+    if "." not in canonical_domain:
         return {
             "is_official": False,
             "canonical_domain": canonical_domain,

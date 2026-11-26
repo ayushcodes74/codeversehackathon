@@ -191,11 +191,11 @@ async def test_orchestration_end_to_end():
 
         task_id = step1_data["task_id"]
 
-        # 4. Safe-Pause & Resume: Verify task is resumable
-        resumable_resp = await client.get(f"/api/v1/agent/tasks/{user_id}/resumable", headers=auth_headers)
+        # 4. Safe-Pause & Resume: Verify task is listed under GET /api/v1/tasks
+        resumable_resp = await client.get(f"/api/v1/tasks?user_id={user_id}", headers=auth_headers)
         assert resumable_resp.status_code == 200
         resumable_data = resumable_resp.json()
-        assert resumable_data["count"] >= 1
+        assert len(resumable_data["tasks"]) >= 1
 
         # 5. Human-in-the-Loop Gate on Final Step (Step 4 Review & Submit)
         dom_step4 = {

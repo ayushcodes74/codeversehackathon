@@ -187,7 +187,7 @@ function applyLanguage(lang) {
 function appendFeed(role, textEn, textHi) {
   const feed = el('chatFeed');
   if (feed.querySelector('.muted')) {
-    feed.innerHTML = '';
+    feed.replaceChildren();
   }
   const div = document.createElement('div');
   div.className = 'feed-msg';
@@ -412,8 +412,9 @@ function renderExecutionPlan(currentStepIndex, totalSteps, statusText, actions) 
   box.classList.remove('hidden');
   const total = totalSteps || DEFAULT_PLAN_STEPS.length;
   const activeStep = currentStepIndex || 1;
+  list.replaceChildren();
 
-  const stepRows = DEFAULT_PLAN_STEPS.slice(0, total).map((item) => {
+  DEFAULT_PLAN_STEPS.slice(0, total).forEach((item) => {
     let badgeClass = 'badge';
     let label = 'pending';
     if (statusText === 'submitted' || item.step < activeStep) {
@@ -423,18 +424,28 @@ function renderExecutionPlan(currentStepIndex, totalSteps, statusText, actions) 
       badgeClass = 'badge info';
       label = statusText || 'active';
     }
-    const title = state.lang === 'hi' ? item.titleHi : item.titleEn;
-    return `<div class="plan-step"><span>${item.step}. ${title}</span><span class="${badgeClass}">${label}</span></div>`;
+    const row = document.createElement('div');
+    row.className = 'plan-step';
+    const titleSpan = document.createElement('span');
+    titleSpan.textContent = `${item.step}. ${state.lang === 'hi' ? item.titleHi : item.titleEn}`;
+    const badgeSpan = document.createElement('span');
+    badgeSpan.className = badgeClass;
+    badgeSpan.textContent = label;
+    row.appendChild(titleSpan);
+    row.appendChild(badgeSpan);
+    list.appendChild(row);
   });
 
   if (Array.isArray(actions) && actions.length > 0) {
     const actionSummary = actions
       .map((a) => `${a.action_type}: ${a.description || a.selector || a.element_key || ''}`)
       .join(' • ');
-    stepRows.push(`<div class="muted" style="margin-top:4px;">Queued actions: ${actionSummary}</div>`);
+    const queuedDiv = document.createElement('div');
+    queuedDiv.className = 'muted';
+    queuedDiv.style.marginTop = '4px';
+    queuedDiv.textContent = `Queued actions: ${actionSummary}`;
+    list.appendChild(queuedDiv);
   }
-
-  list.innerHTML = stepRows.join('');
 }
 
 function renderClarification(step) {
@@ -444,7 +455,7 @@ function renderClarification(step) {
 
   if (!step || step.response_type !== 'clarification') {
     box.classList.add('hidden');
-    optsNode.innerHTML = '';
+    optsNode.replaceChildren();
     return;
   }
 
@@ -455,7 +466,7 @@ function renderClarification(step) {
     step.message ||
     'Please provide additional input:';
   qNode.textContent = questionText;
-  optsNode.innerHTML = '';
+  optsNode.replaceChildren();
 
   const opts = Array.isArray(clar.options) ? clar.options : [];
   opts.forEach((opt) => {
@@ -484,7 +495,7 @@ function renderVisualGuide(card) {
     state.lang === 'hi' && card.explanation_hi ? card.explanation_hi : card.explanation;
 
   const calloutsNode = el('vgCallouts');
-  calloutsNode.innerHTML = '';
+  calloutsNode.replaceChildren();
   (card.bounding_box_callouts || []).forEach((c) => {
     const div = document.createElement('div');
     div.className = 'callout';
@@ -528,7 +539,7 @@ function renderReceipt(receiptData, status) {
 }
 
 function renderMappedPreviewRows(container, actions, summary) {
-  container.innerHTML = '';
+  container.replaceChildren();
   if (Array.isArray(actions) && actions.length > 0) {
     actions.forEach((act) => {
       const item = document.createElement('div');
@@ -681,11 +692,24 @@ async function handleAgentResponse(step) {
     return;
   }
 
-  // Execute approved or non-vault actions on active tab
+  // Clear any prior inline fill-authorization prompt
+  const existingFillPrompt = el('inlineAuthorizeFillPrompt');
+  if (existingFillPrompt) {
+    existingFillPrompt.remove();
+  }
+
+  // Execute approved or non-vault actions on active tab; prompt inline for intermediate vault: FILL_FIELD actions
   if (step.response_type === 'action' && Array.isArray(actions) && actions.length > 0 && state.activeTabId) {
     const hasVaultToken = actions.some(
       (a) => a && typeof a.value_or_vault_ref === 'string' && a.value_or_vault_ref.startsWith('vault:')
     );
+    const hasButtonClick = actions.some((a) => a && a.action_type === 'CLICK_BUTTON');
+
+    if (hasVaultToken && !hasButtonClick && !state.approvedActionHash) {
+      renderAuthorizeFieldFillPrompt(actions);
+      return;
+    }
+
     if (!hasVaultToken || state.approvedActionHash) {
       try {
         const execOutcome = await dispatchActionsToActiveTab(
@@ -701,7 +725,7 @@ async function handleAgentResponse(step) {
         showAlert(`Executed ${okCount} action(s) on active tab${verifiedMsg}.`, 'ok');
 
         // If CLICK_BUTTON submitted the form, scan & verify receipt automatically.
-        if (actions.some((a) => a.action_type === 'CLICK_BUTTON')) {
+        if (hasButtonClick) {
           await new Promise((r) => setTimeout(r, 250));
           await verifySubmissionReceipt();
         }
@@ -710,6 +734,75 @@ async function handleAgentResponse(step) {
       }
     }
   }
+}
+
+function renderAuthorizeFieldFillPrompt(actions) {
+  const planBox = el('executionPlanBox') || el('chatFeed');
+  if (!planBox) return;
+
+  const promptCard = document.createElement('div');
+  promptCard.id = 'inlineAuthorizeFillPrompt';
+  promptCard.className = 'card';
+  promptCard.style.marginTop = '8px';
+  promptCard.style.background = '#eff6ff';
+  promptCard.style.borderColor = '#93c5fd';
+
+  const title = document.createElement('div');
+  title.className = 'field-key';
+  title.textContent =
+    state.lang === 'hi'
+      ? 'वॉल्ट फ़ील्ड भरने की अनुमति दें (Pre-Submit Fill)'
+      : 'Authorize Local Vault Field Fill (Pre-Submit)';
+  promptCard.appendChild(title);
+
+  const previewList = document.createElement('div');
+  previewList.style.margin = '6px 0';
+  renderMappedPreviewRows(previewList, actions, null);
+  promptCard.appendChild(previewList);
+
+  const row = document.createElement('div');
+  row.className = 'row';
+  const authBtn = document.createElement('button');
+  authBtn.type = 'button';
+  authBtn.id = 'authorizeFieldFillBtn';
+  authBtn.className = 'btn';
+  authBtn.textContent =
+    state.lang === 'hi' ? 'फ़ील्ड भरने की अनुमति दें' : 'Authorize Field Fill';
+  authBtn.addEventListener('click', async () => {
+    clearAlert();
+    authBtn.disabled = true;
+    try {
+      await getActiveTabInfo();
+      const fillActions = actions.filter((a) => a && a.action_type === 'FILL_FIELD');
+      const authRes = await sendBg('AUTHORIZE_FIELD_FILL', {
+        tabId: state.activeTabId,
+        task_id: state.taskId,
+        actions: fillActions,
+        dispatch: false,
+      });
+      if (!authRes || !authRes.authorized) {
+        throw new Error('Failed to authorize intermediate field fill.');
+      }
+      const execOutcome = await dispatchActionsToActiveTab(fillActions, state.taskId, null);
+      const okCount = (execOutcome.results || []).filter((r) => r.success).length;
+      promptCard.remove();
+      showAlert(`Authorized and filled ${okCount} verified field(s) on active tab.`, 'ok');
+    } catch (err) {
+      authBtn.disabled = false;
+      showAlert(err.message, 'err');
+    }
+  });
+
+  const dismissBtn = document.createElement('button');
+  dismissBtn.type = 'button';
+  dismissBtn.className = 'btn secondary';
+  dismissBtn.textContent = state.lang === 'hi' ? 'रद्द करें' : 'Dismiss';
+  dismissBtn.addEventListener('click', () => promptCard.remove());
+
+  row.appendChild(authBtn);
+  row.appendChild(dismissBtn);
+  promptCard.appendChild(row);
+  planBox.appendChild(promptCard);
 }
 
 async function runAgentTurn(messageOverride = null, { includeDom = true } = {}) {
@@ -791,7 +884,7 @@ function fileToBase64(file) {
 async function previewMappedFormFields(docType, availableFieldKeys) {
   const box = el('mappedFieldsPreview');
   box.classList.add('hidden');
-  box.innerHTML = '';
+  box.replaceChildren();
 
   await getActiveTabInfo();
   const domSnapshot = await captureActiveTabDom();
@@ -833,7 +926,13 @@ async function previewMappedFormFields(docType, availableFieldKeys) {
       const row = document.createElement('div');
       row.className = 'plan-step';
       const pct = Math.round((m.confidence || 0) * 100);
-      row.innerHTML = `<span>${m.target_label}</span><span class="mono">${m.source_ref} (${pct}%)</span>`;
+      const labelSpan = document.createElement('span');
+      labelSpan.textContent = String(m.target_label || '');
+      const refSpan = document.createElement('span');
+      refSpan.className = 'mono';
+      refSpan.textContent = `${String(m.source_ref || '')} (${pct}%)`;
+      row.appendChild(labelSpan);
+      row.appendChild(refSpan);
       box.appendChild(row);
     });
   } catch (_err) {
@@ -852,20 +951,27 @@ function renderExtractionResult(result) {
 
   const summary = el('stageSummary');
   summary.classList.remove('hidden');
+  summary.replaceChildren();
   const stages = [
     ['1. Technical Specs', v.stage_1_technical_specs],
     ['2. Visual Quality', v.stage_2_visual_quality],
     ['3. Classification', v.stage_3_document_classification],
     ['4. Cross-Field', v.stage_4_cross_field_consistency],
   ];
-  summary.innerHTML = stages
-    .map(([label, st]) => {
-      const ok = st && st.passed;
-      const errText =
-        st && Array.isArray(st.errors) && st.errors.length ? ` (${st.errors.join('; ')})` : '';
-      return `<div><span class="badge ${ok ? 'ok' : 'err'}">${ok ? 'PASS' : 'FAIL'}</span> ${label}${errText}</div>`;
-    })
-    .join('');
+  stages.forEach(([label, st]) => {
+    const ok = Boolean(st && st.passed);
+    const errText =
+      st && Array.isArray(st.errors) && st.errors.length ? ` (${st.errors.join('; ')})` : '';
+    const line = document.createElement('div');
+    const badgeSpan = document.createElement('span');
+    badgeSpan.className = `badge ${ok ? 'ok' : 'err'}`;
+    badgeSpan.textContent = ok ? 'PASS' : 'FAIL';
+    const textSpan = document.createElement('span');
+    textSpan.textContent = ` ${label}${errText}`;
+    line.appendChild(badgeSpan);
+    line.appendChild(textSpan);
+    summary.appendChild(line);
+  });
 
   if (v.auto_formatted_applied && v.auto_formatted_summary) {
     const note = document.createElement('div');
@@ -875,7 +981,7 @@ function renderExtractionResult(result) {
   }
 
   const list = el('extractedFieldsList');
-  list.innerHTML = '';
+  list.replaceChildren();
   const fields = Array.isArray(result.fields) ? result.fields : [];
   fields.forEach((f, idx) => {
     const row = document.createElement('div');
@@ -896,7 +1002,13 @@ function renderExtractionResult(result) {
 
     const confPct = Math.round((f.confidence || 0) * 100);
     const confBadgeClass = confPct >= 85 ? 'ok' : confPct >= 65 ? 'warn' : 'err';
-    lbl.innerHTML = `<span>${f.key}</span><span class="badge ${confBadgeClass}">${confPct}% confidence</span>`;
+    const keySpan = document.createElement('span');
+    keySpan.textContent = String(f.key || '');
+    const confSpan = document.createElement('span');
+    confSpan.className = `badge ${confBadgeClass}`;
+    confSpan.textContent = `${confPct}% confidence`;
+    lbl.appendChild(keySpan);
+    lbl.appendChild(confSpan);
 
     const val = document.createElement('div');
     val.className = 'field-val';

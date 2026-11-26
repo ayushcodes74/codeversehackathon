@@ -89,6 +89,11 @@ class AppSettings(BaseSettings):
         return self.app_env == "development"
 
     @property
+    def is_production(self) -> bool:
+        """Return True when running in production mode."""
+        return self.app_env == "production"
+
+    @property
     def expose_error_details(self) -> bool:
         """Return True if redacted exception details may be included in 500 responses."""
         return self.debug or self.include_error_details or self.is_development

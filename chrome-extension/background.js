@@ -21,6 +21,7 @@ const DEFAULT_API_BASE_URL = 'http://127.0.0.1:8000';
 const SESSION_AUTH_TOKEN_KEY = 'ua_auth_token';
 const SESSION_PASSPHRASE_KEY = 'ua_vault_passphrase';
 const SESSION_APPROVED_HASHES_KEY = 'ua_approved_task_hashes';
+const SESSION_AUTHORIZED_FILL_KEY = 'ua_authorized_fill_tasks';
 const SESSION_STATE_META_KEY = 'ua_session_meta';
 
 const swState = {
@@ -29,6 +30,7 @@ const swState = {
   userId: null,
   profileId: null,
   approvedTaskHashes: {},
+  authorizedFillTasks: {},
 };
 
 // Keep Side Panel available on action/command triggers when configured.
@@ -63,6 +65,7 @@ async function hydrateSessionState() {
   const sess = await sessionGet([
     SESSION_AUTH_TOKEN_KEY,
     SESSION_APPROVED_HASHES_KEY,
+    SESSION_AUTHORIZED_FILL_KEY,
     SESSION_STATE_META_KEY,
   ]);
   if (typeof sess[SESSION_AUTH_TOKEN_KEY] === 'string' && sess[SESSION_AUTH_TOKEN_KEY]) {
@@ -72,6 +75,12 @@ async function hydrateSessionState() {
     swState.approvedTaskHashes = {
       ...sess[SESSION_APPROVED_HASHES_KEY],
       ...swState.approvedTaskHashes,
+    };
+  }
+  if (sess[SESSION_AUTHORIZED_FILL_KEY] && typeof sess[SESSION_AUTHORIZED_FILL_KEY] === 'object') {
+    swState.authorizedFillTasks = {
+      ...sess[SESSION_AUTHORIZED_FILL_KEY],
+      ...swState.authorizedFillTasks,
     };
   }
   const meta = sess[SESSION_STATE_META_KEY];
@@ -98,6 +107,12 @@ async function persistApprovedTaskHash(taskId, actionHash) {
   const key = String(taskId);
   swState.approvedTaskHashes[key] = String(actionHash);
   await sessionSet({ [SESSION_APPROVED_HASHES_KEY]: swState.approvedTaskHashes });
+}
+
+async function persistAuthorizedFillTask(taskId) {
+  const key = String(taskId);
+  swState.authorizedFillTasks[key] = true;
+  await sessionSet({ [SESSION_AUTHORIZED_FILL_KEY]: swState.authorizedFillTasks });
 }
 
 async function resolvePassphrase(msg) {
@@ -453,6 +468,36 @@ async function handleApproveTask(msg) {
   return { ok: true, approval: approvalResp, tab_response: tabResponse };
 }
 
+async function handleAuthorizeFieldFill(msg) {
+  await hydrateSessionState();
+  const taskId = String(msg.task_id || '').trim();
+  if (!taskId) {
+    throw new Error('task_id is required for AUTHORIZE_FIELD_FILL.');
+  }
+
+  const actions = Array.isArray(msg.actions) ? msg.actions : [];
+  if (actions.some((a) => a && a.action_type === 'CLICK_BUTTON')) {
+    throw new Error('AUTHORIZE_FIELD_FILL cannot authorize CLICK_BUTTON or final submit; use APPROVE_TASK.');
+  }
+
+  await persistAuthorizedFillTask(taskId);
+
+  let tabResponse = null;
+  if (actions.length > 0 && msg.dispatch !== false) {
+    const tabId = await getTargetTabId(msg);
+    if (tabId !== null) {
+      tabResponse = await chrome.tabs.sendMessage(tabId, {
+        type: 'EXECUTE_APPROVED_ACTIONS',
+        action: 'EXECUTE_APPROVED_ACTIONS',
+        task_id: taskId,
+        actions,
+      });
+    }
+  }
+
+  return { ok: true, task_id: taskId, authorized: true, tab_response: tabResponse };
+}
+
 async function handleResolveVaultTokens(msg) {
   await hydrateSessionState();
   const vault = globalThis.CryptoVault;
@@ -460,17 +505,22 @@ async function handleResolveVaultTokens(msg) {
     throw new Error('CryptoVault runtime is unavailable in service worker.');
   }
 
-  // Reject unapproved or previewOnly attempts: raw vault values never resolve without an approved task.
+  // Reject unapproved or previewOnly attempts: raw vault values never resolve without authorization.
   if (msg.previewOnly === true) {
-    throw new Error('previewOnly token resolution is blocked: raw vault values require explicit task approval.');
+    throw new Error('previewOnly token resolution is blocked: raw vault values require explicit authorization.');
   }
 
   const taskId = String(msg.task_id || '').trim();
   const approvedHash = taskId ? swState.approvedTaskHashes[taskId] : null;
-  if (!taskId || !approvedHash) {
-    throw new Error('Task has not been explicitly approved in approvedTaskHashes. Vault resolution denied.');
+  const fillAuthorized = taskId ? Boolean(swState.authorizedFillTasks[taskId]) : false;
+
+  if (!taskId || (!approvedHash && !fillAuthorized)) {
+    throw new Error('Task has not been authorized for field fill or approved in approvedTaskHashes. Vault resolution denied.');
   }
-  if (msg.action_hash && msg.action_hash !== approvedHash) {
+  if (msg.action_type === 'CLICK_BUTTON' && !approvedHash) {
+    throw new Error('CLICK_BUTTON / final submit requires explicit APPROVE_TASK with pending_action_hash.');
+  }
+  if (msg.action_hash && (!approvedHash || msg.action_hash !== approvedHash)) {
     throw new Error('action_hash mismatch against approvedTaskHashes.');
   }
 
@@ -568,6 +618,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           throw new Error('Extension page origin required for AGENT_CHAT_STEP.');
         }
         return handleAgentChatStep(msg);
+
+      case 'AUTHORIZE_FIELD_FILL':
+        if (!isTrustedExtensionPage(sender)) {
+          throw new Error('Extension page origin required for AUTHORIZE_FIELD_FILL.');
+        }
+        return handleAuthorizeFieldFill(msg);
 
       case 'APPROVE_TASK':
         if (!isTrustedExtensionPage(sender)) {
