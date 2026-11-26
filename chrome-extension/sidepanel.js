@@ -588,6 +588,16 @@ function renderVisualGuide(card) {
   el('vgExplanation').textContent =
     state.lang === 'hi' && card.explanation_hi ? card.explanation_hi : card.explanation;
 
+  const img = el('vgAnnotatedImage');
+  if (img) {
+    if (card.annotated_image_url) {
+      img.src = card.annotated_image_url;
+      img.style.display = 'block';
+    } else {
+      img.style.display = 'none';
+    }
+  }
+
   const calloutsNode = el('vgCallouts');
   calloutsNode.replaceChildren();
   (card.bounding_box_callouts || []).forEach((c) => {
@@ -598,6 +608,166 @@ function renderVisualGuide(card) {
     div.textContent = `${lbl}: ${desc}`;
     calloutsNode.appendChild(div);
   });
+}
+
+// ---------------------------------------------------------------------------
+// Multilingual Voice Input/Output with Fallback (FR-052)
+// ---------------------------------------------------------------------------
+
+let activeSpeechRecognition = null;
+let isVoiceListening = false;
+
+function initVoiceSpeechRecognition() {
+  const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRec) {
+    return null;
+  }
+  const rec = new SpeechRec();
+  rec.continuous = false;
+  rec.interimResults = true;
+  rec.lang = state.lang === 'hi' ? 'hi-IN' : 'en-IN';
+
+  rec.onstart = () => {
+    isVoiceListening = true;
+    const btn = el('micBtn');
+    if (btn) btn.textContent = '⏹ Stop';
+    const status = el('voiceStatus');
+    if (status) status.textContent = state.lang === 'hi' ? 'सुन रहा हूँ...' : 'Listening...';
+  };
+
+  rec.onresult = (evt) => {
+    const transcript = Array.from(evt.results)
+      .map((r) => r[0].transcript)
+      .join('');
+    const input = el('goalInput');
+    if (input) input.value = transcript;
+  };
+
+  rec.onerror = (err) => {
+    console.warn('Speech recognition error:', err);
+    stopVoiceListening();
+    const status = el('voiceStatus');
+    if (status) {
+      status.textContent =
+        err.error === 'not-allowed'
+          ? (state.lang === 'hi' ? 'माइक अनुमति अस्वीकृत' : 'Mic permission denied')
+          : (state.lang === 'hi' ? 'माइक त्रुटि' : 'Mic error');
+    }
+  };
+
+  rec.onend = () => {
+    stopVoiceListening();
+  };
+
+  return rec;
+}
+
+function stopVoiceListening() {
+  isVoiceListening = false;
+  const btn = el('micBtn');
+  if (btn) btn.textContent = '🎤 Speak';
+  const status = el('voiceStatus');
+  if (status && status.textContent && (status.textContent.includes('Listening') || status.textContent.includes('सुन'))) {
+    status.textContent = '';
+  }
+}
+
+function toggleVoiceInput() {
+  const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRec) {
+    const status = el('voiceStatus');
+    if (status) {
+      status.textContent =
+        state.lang === 'hi'
+          ? 'वॉइस इनपुट असमर्थित है (कृपया टाइप करें)'
+          : 'Voice input unsupported (please type)';
+    }
+    return;
+  }
+
+  if (isVoiceListening) {
+    if (activeSpeechRecognition) {
+      activeSpeechRecognition.stop();
+    }
+    stopVoiceListening();
+    return;
+  }
+
+  try {
+    activeSpeechRecognition = initVoiceSpeechRecognition();
+    if (activeSpeechRecognition) {
+      activeSpeechRecognition.start();
+    }
+  } catch (err) {
+    console.warn('Could not start speech recognition:', err);
+    stopVoiceListening();
+    const status = el('voiceStatus');
+    if (status) {
+      status.textContent = state.lang === 'hi' ? 'माइक्रोफ़ोन त्रुटि' : 'Mic startup error';
+    }
+  }
+}
+
+function speakLatestResponse() {
+  if (!('speechSynthesis' in window)) {
+    const status = el('voiceStatus');
+    if (status) {
+      status.textContent =
+        state.lang === 'hi'
+          ? 'वॉइस आउटपुट असमर्थित है'
+          : 'Voice output unsupported';
+    }
+    return;
+  }
+
+  if (window.speechSynthesis.speaking) {
+    window.speechSynthesis.cancel();
+    const speakerBtn = el('speakerBtn');
+    if (speakerBtn) speakerBtn.textContent = '🔊 Listen';
+    const status = el('voiceStatus');
+    if (status) status.textContent = '';
+    return;
+  }
+
+  let textToSpeak = '';
+  const vgCard = el('visualGuideCard');
+  if (vgCard && !vgCard.classList.contains('hidden')) {
+    textToSpeak = el('vgExplanation').textContent;
+  }
+
+  if (!textToSpeak) {
+    const messages = el('chatFeed').querySelectorAll('.bubble.agent');
+    if (messages.length > 0) {
+      textToSpeak = messages[messages.length - 1].textContent;
+    }
+  }
+
+  if (!textToSpeak) {
+    textToSpeak = state.lang === 'hi' ? 'कोई नई प्रतिक्रिया नहीं है।' : 'No recent agent message to read.';
+  }
+
+  const utterance = new SpeechSynthesisUtterance(textToSpeak);
+  utterance.lang = state.lang === 'hi' ? 'hi-IN' : 'en-IN';
+
+  const speakerBtn = el('speakerBtn');
+  const status = el('voiceStatus');
+
+  utterance.onstart = () => {
+    if (speakerBtn) speakerBtn.textContent = '⏹ Stop';
+    if (status) status.textContent = state.lang === 'hi' ? 'बोल रहा हूँ...' : 'Speaking...';
+  };
+
+  utterance.onend = () => {
+    if (speakerBtn) speakerBtn.textContent = '🔊 Listen';
+    if (status) status.textContent = '';
+  };
+
+  utterance.onerror = () => {
+    if (speakerBtn) speakerBtn.textContent = '🔊 Listen';
+    if (status) status.textContent = '';
+  };
+
+  window.speechSynthesis.speak(utterance);
 }
 
 // ---------------------------------------------------------------------------
@@ -1583,6 +1753,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     const query = el('goalInput').value.trim() || 'Where is my account number on the passbook?';
     runAgentTurn(query, { includeDom: false }).catch((err) => showAlert(err.message, 'err'));
   });
+
+  const micBtn = el('micBtn');
+  if (micBtn) {
+    micBtn.addEventListener('click', toggleVoiceInput);
+  }
+  const speakerBtn = el('speakerBtn');
+  if (speakerBtn) {
+    speakerBtn.addEventListener('click', speakLatestResponse);
+  }
 
   el('sendClarificationBtn').addEventListener('click', () => {
     const answer = el('clarificationInput').value.trim();

@@ -9,7 +9,8 @@ Enforces:
 
 from __future__ import annotations
 import uuid
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
+import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -33,10 +34,21 @@ def normalize_host(url: str) -> str:
     return host.removeprefix("www.")
 
 
-async def check_domain_shield(url: str, db: AsyncSession) -> VerifyDomainOutput:
-    """Validates the target URL against the PostgreSQL approved_portals table.
+async def check_domain_shield(
+    url: str,
+    db: AsyncSession,
+    validate_redirects: bool = True,
+    client: httpx.AsyncClient | None = None,
+) -> VerifyDomainOutput:
+    """Validates the target URL against the PostgreSQL approved_portals table (FR-012, FR-013).
 
-    Blocks file:// and non-HTTP(S) schemes, punycode/IDN homographs, and unregistered domains.
+    Enforces:
+    1. Scheme check: only http and https allowed.
+    2. Punycode / non-ASCII IDN homograph rejection.
+    3. Whitelist match against approved_portals.domain.
+    4. Subpath restriction: enforces allowed_paths if specified by portal governance.
+    5. HTTP redirect chain validation: traces 301/302/303/307/308 hops and blocks if any hop
+       leaves approved domains/paths.
     """
     raw = (url or "").strip()
     if not raw:
@@ -47,17 +59,18 @@ async def check_domain_shield(url: str, db: AsyncSession) -> VerifyDomainOutput:
             warning="No URL provided for domain verification.",
         )
 
-    if "://" in raw:
-        scheme = urlparse(raw).scheme.lower()
-        if scheme not in ("http", "https"):
-            return VerifyDomainOutput(
-                is_allowed=False,
-                domain="",
-                shield_status="BLOCKED_UNOFFICIAL",
-                warning=f"URL scheme '{scheme}://' is blocked by Official Domain Shield.",
-            )
+    parsed = urlparse(raw if "://" in raw else f"http://{raw}")
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https"):
+        return VerifyDomainOutput(
+            is_allowed=False,
+            domain="",
+            shield_status="BLOCKED_UNOFFICIAL",
+            warning=f"URL scheme '{scheme}://' is blocked by Official Domain Shield.",
+        )
 
     host = normalize_host(raw)
+    path = parsed.path or "/"
     if not host:
         return VerifyDomainOutput(
             is_allowed=False,
@@ -85,6 +98,9 @@ async def check_domain_shield(url: str, db: AsyncSession) -> VerifyDomainOutput:
             category="Development & Testing",
             shield_status="LOCAL_DEV_ALLOWED",
             warning=None,
+            allowed_paths=[],
+            support_tier="local_dev",
+            redirect_chain=[raw],
         )
 
     # 2. Query approved_portals in PostgreSQL
@@ -92,24 +108,107 @@ async def check_domain_shield(url: str, db: AsyncSession) -> VerifyDomainOutput:
     result = await db.execute(stmt)
     portals = result.scalars().all()
 
+    matched_portal: ApprovedPortal | None = None
     for portal in portals:
         approved_domain = portal.domain.lower().strip().removeprefix("www.")
         if host == approved_domain:
+            matched_portal = portal
+            break
+
+    if not matched_portal:
+        return VerifyDomainOutput(
+            is_allowed=False,
+            domain=host,
+            shield_status="BLOCKED_UNOFFICIAL",
+            warning=f"Domain '{host}' is NOT on the verified official government portal whitelist. Auto-fill blocked by Domain Shield.",
+            redirect_chain=[raw],
+        )
+
+    # 3. Path Governance Check (FR-012)
+    allowed_paths: list[str] = matched_portal.allowed_paths or []
+    if allowed_paths:
+        normalized_path = path if path.startswith("/") else f"/{path}"
+        path_permitted = any(
+            normalized_path == p or normalized_path.startswith(p.rstrip("/") + "/")
+            for p in allowed_paths
+        )
+        if not path_permitted:
             return VerifyDomainOutput(
-                is_allowed=True,
+                is_allowed=False,
                 domain=host,
-                portal_name=portal.portal_name,
-                category=portal.category,
-                shield_status="VERIFIED_OFFICIAL",
-                warning=None,
+                portal_name=matched_portal.portal_name,
+                category=matched_portal.category,
+                shield_status="BLOCKED_UNOFFICIAL",
+                warning=f"Path '{path}' is not within permitted allowed_paths {allowed_paths} for official portal '{matched_portal.portal_name}'.",
+                allowed_paths=allowed_paths,
+                support_tier=matched_portal.support_tier or "verified_official",
+                redirect_chain=[raw],
             )
 
-    # 3. Domain not on whitelist -> Block!
+    # 4. HTTP Redirect Chain Validation (FR-013)
+    redirect_chain = [raw]
+    if validate_redirects and scheme in ("http", "https"):
+        curr_url = raw
+        should_close_client = False
+        http_client = client
+        if http_client is None:
+            http_client = httpx.AsyncClient(
+                follow_redirects=False,
+                timeout=3.0,
+                headers={"User-Agent": "Universal-Gov-Agent/1.0 (DomainShieldValidator)"},
+            )
+            should_close_client = True
+
+        try:
+            for _ in range(5):  # Max 5 hops
+                try:
+                    resp = await http_client.head(curr_url)
+                    if resp.status_code in (405, 501):
+                        resp = await http_client.get(curr_url)
+                except Exception:
+                    # Network errors on live URL during offline test or unreachable network
+                    break
+
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    loc = resp.headers.get("Location")
+                    if not loc:
+                        break
+                    next_url = urljoin(curr_url, loc)
+                    redirect_chain.append(next_url)
+
+                    # Check domain and path of intermediate/final redirect hop
+                    hop_verif = await check_domain_shield(
+                        next_url, db, validate_redirects=False, client=http_client
+                    )
+                    if not hop_verif.is_allowed:
+                        return VerifyDomainOutput(
+                            is_allowed=False,
+                            domain=host,
+                            portal_name=matched_portal.portal_name,
+                            category=matched_portal.category,
+                            shield_status="BLOCKED_UNOFFICIAL",
+                            warning=f"Redirect chain escaped approved domain/paths to unverified target: {next_url}",
+                            allowed_paths=allowed_paths,
+                            support_tier=matched_portal.support_tier or "verified_official",
+                            redirect_chain=redirect_chain,
+                        )
+                    curr_url = next_url
+                else:
+                    break
+        finally:
+            if should_close_client:
+                await http_client.aclose()
+
     return VerifyDomainOutput(
-        is_allowed=False,
+        is_allowed=True,
         domain=host,
-        shield_status="BLOCKED_UNOFFICIAL",
-        warning=f"Domain '{host}' is NOT on the verified official government portal whitelist. Auto-fill blocked by Domain Shield.",
+        portal_name=matched_portal.portal_name,
+        category=matched_portal.category,
+        shield_status="VERIFIED_OFFICIAL",
+        warning=None,
+        allowed_paths=allowed_paths,
+        support_tier=matched_portal.support_tier or "verified_official",
+        redirect_chain=redirect_chain,
     )
 
 
@@ -175,7 +274,12 @@ async def discover_or_narrow_portal(
                     category=c.category,
                     domicile_state=c.domicile_state,
                     education_level=c.education_level,
-                    required_doc_types=c.required_doc_types or []
+                    required_doc_types=c.required_doc_types or [],
+                    allowed_paths=c.allowed_paths or [],
+                    source=c.source or "official_gazette",
+                    owner=c.owner or "Govt of India",
+                    review_date=c.review_date,
+                    support_tier=c.support_tier or "verified_official",
                 )
                 msg = f"Navigating to official portal: {c.portal_name}"
                 return item, None, msg
@@ -229,7 +333,12 @@ async def discover_or_narrow_portal(
             category=chosen.category,
             domicile_state=chosen.domicile_state,
             education_level=chosen.education_level,
-            required_doc_types=chosen.required_doc_types or []
+            required_doc_types=chosen.required_doc_types or [],
+            allowed_paths=chosen.allowed_paths or [],
+            source=chosen.source or "official_gazette",
+            owner=chosen.owner or "Govt of India",
+            review_date=chosen.review_date,
+            support_tier=chosen.support_tier or "verified_official",
         )
         msg_en = f"Found verified government portal: {chosen.portal_name} ({chosen.domain}). Ready to begin application."
         msg_hi = f"सत्यापित सरकारी पोर्टल मिला: {chosen.portal_name} ({chosen.domain})। आवेदन शुरू करने के लिए तैयार।"

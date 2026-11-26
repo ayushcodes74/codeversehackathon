@@ -113,9 +113,52 @@ async def audit_log_tool_call(
 # =====================================================================
 
 # 1. understand_user_goal
-async def understand_user_goal_tool(payload: UnderstandUserGoalInput) -> UnderstandUserGoalOutput:
+async def understand_user_goal_tool(
+    payload: UnderstandUserGoalInput,
+    llm_client: Any = None,
+) -> UnderstandUserGoalOutput:
+    """Classifies user intent and extracts portal discovery entities via structured LLM tool-calling,
+    with automatic graceful fallback to deterministic keyword heuristics."""
+    # 1. Attempt structured LLM tool calling if configured
+    try:
+        from app.llm.client import get_llm_client, UnconfiguredLLMClient
+        from app.llm.types import LLMRequest, LLMChatMessage
+
+        llm = llm_client or get_llm_client()
+        if not isinstance(llm, UnconfiguredLLMClient):
+            req = LLMRequest(
+                messages=[
+                    LLMChatMessage(
+                        role="system",
+                        content=(
+                            "You are a structured goal and intent discovery engine for Indian citizen web automation. "
+                            "Analyze the user message and extract: "
+                            "intent ('form_automation', 'visual_guide_qa', 'portal_discovery', 'clarification_needed', 'status_check'), "
+                            "detected_language ('en', 'hi', or 'hinglish'), "
+                            "and extracted_entities (domicile_state, education_level, scheme_or_portal, id_type, etc.)."
+                        ),
+                    ),
+                    LLMChatMessage(
+                        role="user",
+                        content=payload.user_message,
+                    ),
+                ],
+                temperature=0.0,
+            )
+            llm_res = await llm.generate_structured(req, UnderstandUserGoalOutput)
+            if llm_res.parsed:
+                return llm_res.parsed
+    except Exception:
+        pass
+
+    # 2. Heuristic fallback (fast, deterministic, zero-dependency)
     msg = payload.user_message.lower().strip()
     entities: dict[str, Any] = {}
+
+    if any(s in msg for s in ["scholarship", "nsp", "fellowship", "छात्रवृत्ति"]):
+        entities["scheme_type"] = "scholarship"
+    elif any(s in msg for s in ["pan", "pan card", "nsdl", "uti"]):
+        entities["scheme_type"] = "pan"
 
     # Extract state if mentioned
     for state in ["karnataka", "maharashtra", "uttar pradesh", "delhi", "tamil nadu", "bihar"]:
@@ -129,7 +172,7 @@ async def understand_user_goal_tool(payload: UnderstandUserGoalInput) -> Underst
         entities["education_level"] = "Pre-Matric"
 
     # Intent detection
-    if any(w in msg for w in ["where is", "where can i find", "how to find", "what is", "passbook", "ifsc"]):
+    if any(w in msg for w in ["where is", "where can i find", "how to find", "what is", "passbook", "ifsc", "खाता"]):
         intent = "visual_guide_qa"
     elif any(w in msg for w in ["status", "check status", "application status"]):
         intent = "status_check"
@@ -148,7 +191,53 @@ async def understand_user_goal_tool(payload: UnderstandUserGoalInput) -> Underst
 
 
 # 2. generate_task_plan
-async def generate_task_plan_tool(payload: GenerateTaskPlanInput) -> GenerateTaskPlanOutput:
+async def generate_task_plan_tool(
+    payload: GenerateTaskPlanInput,
+    db: AsyncSession | None = None,
+) -> GenerateTaskPlanOutput:
+    if db is not None:
+        try:
+            from app.models import WorkflowDefinition, ApprovedPortal
+            from sqlalchemy import select, desc
+            clean_name = payload.portal_name.lower().replace(" ", "_")
+            portal_id_subq = (
+                select(ApprovedPortal.id)
+                .where(ApprovedPortal.entry_url == payload.portal_url)
+                .scalar_subquery()
+            )
+            stmt = (
+                select(WorkflowDefinition)
+                .where(
+                    (WorkflowDefinition.workflow_id == clean_name)
+                    | (WorkflowDefinition.workflow_id.ilike(f"%{clean_name}%"))
+                    | (WorkflowDefinition.name.ilike(f"%{payload.portal_name}%"))
+                    | (WorkflowDefinition.portal_id == portal_id_subq),
+                    WorkflowDefinition.is_active == True,  # noqa: E712
+                )
+                .order_by(desc(WorkflowDefinition.version))
+            )
+            wf = (await db.execute(stmt)).scalars().first()
+            if wf and wf.steps:
+                wf_steps = [
+                    PlanStep(
+                        step_index=s.get("step_index", idx + 1),
+                        step_name=s.get("step_name", f"Step {idx + 1}"),
+                        step_name_hi=s.get("step_name_hi"),
+                        description=s.get("description", ""),
+                        expected_action=s.get("expected_action", "FILL_FIELDS"),
+                    )
+                    for idx, s in enumerate(wf.steps)
+                ]
+                return GenerateTaskPlanOutput(
+                    plan_id=f"{wf.workflow_id}_v{wf.version}",
+                    goal=payload.goal_text,
+                    portal_name=wf.name,
+                    total_steps=len(wf_steps),
+                    steps=wf_steps,
+                )
+        except Exception as e:
+            print(f"[GenerateTaskPlan Error] {e}")
+
     steps = [
         PlanStep(
             step_index=1,
@@ -207,7 +296,12 @@ async def search_approved_portals_tool(payload: SearchApprovedPortalsInput, db: 
             category=r.category,
             domicile_state=r.domicile_state,
             education_level=r.education_level,
-            required_doc_types=r.required_doc_types or []
+            required_doc_types=r.required_doc_types or [],
+            allowed_paths=r.allowed_paths or [],
+            source=r.source or "official_gazette",
+            owner=r.owner or "Govt of India",
+            review_date=r.review_date,
+            support_tier=r.support_tier or "verified_official",
         )
         for r in records
     ]

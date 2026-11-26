@@ -39,6 +39,11 @@ def create_app(custom_settings: AppSettings | None = None) -> FastAPI:
             app_settings.app_version,
             app_settings.app_env,
         )
+        try:
+            from app.database import init_db_schema
+            await init_db_schema()
+        except Exception as e:
+            logger.warning("DB schema init notice: %s", e)
         yield
         logger.info("Shutting down %s", app_settings.app_name)
 

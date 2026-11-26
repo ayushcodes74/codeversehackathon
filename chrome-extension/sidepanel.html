@@ -350,6 +350,11 @@
       <button id="inspectGuideBtn" type="button" class="btn secondary" data-i18n="visualGuideBtn">Visual Guide Q&amp;A</button>
       <button id="reviewPendingBtn" type="button" class="btn secondary hidden" data-i18n="reviewApprovalBtn">Review &amp; Approve</button>
     </div>
+    <div class="row" style="margin-top: 4px; gap: 6px; align-items: center;">
+      <button id="micBtn" type="button" class="btn secondary small" title="Speech to Text (English / Hindi)">🎤 Speak</button>
+      <button id="speakerBtn" type="button" class="btn secondary small" title="Read Agent Response Aloud">🔊 Listen</button>
+      <span id="voiceStatus" class="muted" style="font-size: 11px;"></span>
+    </div>
 
     <!-- Clarification Input Box -->
     <div id="clarificationBox" class="clarification-box hidden">
@@ -371,6 +376,9 @@
         <span id="vgSampleBadge" class="badge">sample</span>
       </h2>
       <p id="vgExplanation" style="margin: 4px 0;"></p>
+      <div id="vgImageContainer" style="margin-top: 8px; text-align: center;">
+        <img id="vgAnnotatedImage" style="max-width: 100%; border-radius: 6px; border: 1px solid #cbd5e1; display: none;" alt="Annotated Visual Guide" />
+      </div>
       <div id="vgCallouts"></div>
     </div>
   </section>

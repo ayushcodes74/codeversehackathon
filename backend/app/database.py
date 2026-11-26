@@ -60,6 +60,26 @@ class Base(DeclarativeBase):
     pass
 
 
+from sqlalchemy import text
+
+
+async def init_db_schema() -> None:
+    """Ensures workflow_definitions and expanded portal columns exist in PostgreSQL."""
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+            try:
+                await conn.execute(text("ALTER TABLE approved_portals ADD COLUMN IF NOT EXISTS allowed_paths JSONB DEFAULT '[]'::jsonb;"))
+                await conn.execute(text("ALTER TABLE approved_portals ADD COLUMN IF NOT EXISTS source VARCHAR(100) DEFAULT 'official_gazette';"))
+                await conn.execute(text("ALTER TABLE approved_portals ADD COLUMN IF NOT EXISTS owner VARCHAR(100) DEFAULT 'Govt of India';"))
+                await conn.execute(text("ALTER TABLE approved_portals ADD COLUMN IF NOT EXISTS review_date TIMESTAMPTZ;"))
+                await conn.execute(text("ALTER TABLE approved_portals ADD COLUMN IF NOT EXISTS support_tier VARCHAR(50) DEFAULT 'verified_official';"))
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 async def get_db():
     """FastAPI dependency to inject and commit/rollback an async DB session."""
     async with AsyncSessionLocal() as session:
