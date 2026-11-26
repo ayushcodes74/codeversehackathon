@@ -19,3 +19,7 @@ local.properties
 *.iml
 .cxx/
 
+
+backend/.env
+**/__pycache__/
+*.pyc
