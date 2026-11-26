@@ -7,23 +7,63 @@
   <link rel="stylesheet" href="sidepanel.css" />
 </head>
 <body>
-  <div class="wallet-shell">
-    <!-- 1. Top Account & Menu Bar -->
-    <header class="wallet-topbar">
-      <button id="accountPillBtn" type="button" class="account-pill-btn" aria-expanded="false" aria-controls="sessionVaultDrawer">
-        <span class="avatar-dot" aria-hidden="true"></span>
-        <span id="accountPillLabel" class="account-pill-label" data-i18n="appTitle">Universal AI Assistant</span>
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.7; flex-shrink:0;">
-          <polyline points="6 9 12 15 18 9"/>
+  <!-- =====================================================================
+       VIEW 1: GOOGLE AUTH GATE SCREEN (When Logged Out)
+       ===================================================================== -->
+  <div id="authGateView" class="auth-gate-shell">
+    <div class="auth-gate-card">
+      <div class="auth-logo-ring" aria-hidden="true">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 2L3 7v6c0 5.25 3.83 10.15 9 11 5.17-.85 9-5.75 9-11V7l-9-5z"/>
+          <path d="M9 12l2 2 4-4"/>
         </svg>
+      </div>
+      <h1 class="auth-title">Universal AI Assistant</h1>
+      <p class="auth-subtitle">
+        Zero-Leak CryptoVault · Official Domain Shield · Bilingual Form Copilot
+      </p>
+
+      <button id="googleSignInBtn" type="button" class="btn btn-google-cta">
+        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+          <path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"/>
+          <path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.14C3.26 21.3 7.31 24 12 24z"/>
+          <path fill="#FBBC05" d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14z"/>
+          <path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96z"/>
+        </svg>
+        <span>Continue with Google</span>
       </button>
 
+      <div id="authGateAlert" class="status-banner" style="margin-top: 12px;"></div>
+
+      <details class="auth-advanced-details">
+        <summary>Backend Server Settings</summary>
+        <div style="margin-top: 8px; text-align: left;">
+          <label class="field-label" for="authGateApiUrlInput">Backend API URL</label>
+          <input id="authGateApiUrlInput" type="url" value="http://127.0.0.1:8000" />
+        </div>
+      </details>
+    </div>
+  </div>
+
+  <!-- =====================================================================
+       VIEW 2: GPT / COPILOT WORKSPACE (When Signed In with Google)
+       ===================================================================== -->
+  <div id="workspaceView" class="copilot-shell hidden">
+    <!-- 1. Top Header Bar -->
+    <header class="wallet-topbar">
+      <div class="user-profile-pill" title="Signed in via Google">
+        <img id="userAvatarImg" class="user-avatar-img hidden" alt="User avatar" />
+        <span id="userAvatarFallback" class="avatar-dot">U</span>
+        <span id="userProfileName" class="account-pill-label">Citizen User</span>
+      </div>
+
       <div class="topbar-right">
+        <span id="domainShieldBadge" class="badge">Checking...</span>
         <div class="lang-toggle" role="group" aria-label="Language">
           <button id="langEnBtn" type="button" class="active">EN</button>
           <button id="langHiBtn" type="button">Hinglish</button>
         </div>
-        <button id="walletMenuBtn" type="button" class="menu-circle-btn" title="Settings &amp; Vault Menu" aria-expanded="false" aria-controls="walletMenuPopover">
+        <button id="walletMenuBtn" type="button" class="menu-circle-btn" title="Settings &amp; Account Menu" aria-expanded="false" aria-controls="walletMenuPopover">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
             <circle cx="12" cy="5" r="1.8"/>
             <circle cx="12" cy="12" r="1.8"/>
@@ -34,208 +74,64 @@
 
       <!-- Floating Frosted-Glass Three-Dot Popover Menu -->
       <div id="walletMenuPopover" class="frosted-popover hidden" role="menu">
-        <button id="menuOpenSessionBtn" type="button" class="popover-row" role="menuitem">
-          <span class="popover-row-left">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-            <span data-i18n="sessionVaultTitle">Session &amp; Dev Login</span>
-          </span>
-          <span id="authStatusBadge" class="badge warn">Not Connected</span>
-        </button>
-        <button id="menuOpenVaultBtn" type="button" class="popover-row" role="menuitem">
-          <span class="popover-row-left">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-            <span>CryptoVault</span>
-          </span>
-          <span id="vaultLockBadge" class="badge warn">Locked</span>
-        </button>
-        <button id="menuVerifyPortalBtn" type="button" class="popover-row" role="menuitem">
+        <div class="popover-section">
+          <div class="popover-row-label">CryptoVault Passphrase</div>
+          <div class="row" style="margin-bottom: 4px;">
+            <input id="vaultPassphraseInput" type="password" placeholder="AES-256-GCM Passphrase" />
+          </div>
+          <div class="row" style="margin-bottom: 0;">
+            <button id="unlockVaultBtn" type="button" class="btn small" data-i18n="unlockBtn">Unlock</button>
+            <button id="lockVaultBtn" type="button" class="btn secondary small" data-i18n="lockBtn">Lock</button>
+          </div>
+        </div>
+        <div class="popover-divider"></div>
+        <div class="popover-section">
+          <label class="field-label" for="apiBaseUrlInput" data-i18n="apiUrlLabel">Backend API URL</label>
+          <input id="apiBaseUrlInput" type="url" value="http://127.0.0.1:8000" />
+        </div>
+        <button id="refreshShieldBtn" type="button" class="popover-row" role="menuitem">
           <span class="popover-row-left">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L3 7v6c0 5.25 3.83 10.15 9 11 5.17-.85 9-5.75 9-11V7l-9-5z"/></svg>
             <span data-i18n="recheckDomainBtn">Verify Portal</span>
           </span>
         </button>
         <div class="popover-divider"></div>
-        <button id="menuToggleLangBtn" type="button" class="popover-row" role="menuitem">
+        <button id="signOutBtn" type="button" class="popover-row popover-row-danger" role="menuitem">
           <span class="popover-row-left">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-            <span>EN / Hinglish</span>
-          </span>
-          <span id="menuLangLabel" class="muted">EN</span>
-        </button>
-        <button id="menuLockVaultBtn" type="button" class="popover-row" role="menuitem">
-          <span class="popover-row-left">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></svg>
-            <span data-i18n="lockBtn">Lock Vault</span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+            <span>Sign Out</span>
           </span>
         </button>
       </div>
     </header>
 
-    <!-- 2. Full-Width Portal / Network Selector Bar -->
-    <div class="network-bar">
-      <div class="network-bar-left">
-        <span class="network-icon" aria-hidden="true">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
-            <path d="M12 2L3 7v6c0 5.25 3.83 10.15 9 11 5.17-.85 9-5.75 9-11V7l-9-5z"/>
-          </svg>
-        </span>
-        <div class="network-text-group">
-          <span id="domainShieldBadge" class="badge">Checking Domain...</span>
+    <!-- 2. Top Compact Document & CryptoVault Bar -->
+    <section class="vault-top-bar">
+      <div class="vault-bar-header">
+        <div class="vault-bar-status">
+          <span id="vaultLockBadge" class="badge warn">Locked</span>
           <span id="domainReasonText" class="network-reason"></span>
         </div>
-      </div>
-      <button id="refreshShieldBtn" type="button" class="btn secondary small" data-i18n="recheckDomainBtn">Verify Portal</button>
-    </div>
-
-    <div id="globalAlert" class="status-banner"></div>
-
-    <!-- Collapsible Session, Dev Login & CryptoVault Drawer -->
-    <section id="sessionVaultDrawer" class="card hidden">
-      <h2>
-        <span data-i18n="sessionVaultTitle">Session &amp; Domain Shield</span>
-        <span id="drawerCloseHint" class="muted" style="cursor:pointer;">✕</span>
-      </h2>
-      <div class="row">
-        <div style="flex: 1 1 56%;">
-          <label class="field-label" for="apiBaseUrlInput" data-i18n="apiUrlLabel">Backend API URL</label>
-          <input id="apiBaseUrlInput" type="url" value="http://127.0.0.1:8000" />
-        </div>
-        <div style="flex: 1 1 40%;">
-          <label class="field-label" for="userIdInput" data-i18n="userIdLabel">User ID (Optional UUID)</label>
-          <input id="userIdInput" type="text" placeholder="Auto-init if blank" />
-        </div>
-      </div>
-      <div class="row">
-        <div style="flex: 1 1 48%;">
-          <label class="field-label" for="userFullNameInput" data-i18n="fullNameLabel">Full Name</label>
-          <input id="userFullNameInput" type="text" placeholder="Ayush Kumar" />
-        </div>
-        <div style="flex: 1 1 48%;">
-          <label class="field-label" for="userEmailInput" data-i18n="emailLabel">Email</label>
-          <input id="userEmailInput" type="email" placeholder="citizen@example.com" />
-        </div>
-      </div>
-      <div class="row">
-        <button id="authInitBtn" type="button" class="btn small" data-i18n="connectBtn">Connect / Dev Login</button>
-      </div>
-      <div class="row" style="margin-top: 6px; margin-bottom: 0; align-items: flex-end;">
-        <div style="flex: 1;">
-          <label class="field-label" for="vaultPassphraseInput" data-i18n="passphraseLabel">Local CryptoVault Passphrase</label>
-          <input id="vaultPassphraseInput" type="password" placeholder="AES-256-GCM Passphrase" />
-        </div>
-        <button id="unlockVaultBtn" type="button" class="btn secondary small" data-i18n="unlockBtn">Unlock</button>
-        <button id="lockVaultBtn" type="button" class="btn secondary small" data-i18n="lockBtn">Lock</button>
-      </div>
-    </section>
-
-    <!-- 3. Centered Hero Status & Quick Action Row -->
-    <section class="hero-section">
-      <div class="hero-kicker">
-        <span>Active Agent Goal</span>
-        <span id="taskStateBadge" class="badge">Idle</span>
-        <span id="activeToolBadge" class="badge info hidden">tool: -</span>
-      </div>
-      <h1 id="heroStatusHeadline" class="hero-headline">Ready · 0/4 Steps</h1>
-
-      <div class="hero-actions">
-        <button id="sendGoalBtn" type="button" class="btn" data-i18n="runStepBtn">Run Step</button>
-        <button id="inspectGuideBtn" type="button" class="btn secondary" data-i18n="visualGuideBtn">Visual Guide Q&amp;A</button>
-        <button id="resetTaskBtn" type="button" class="btn secondary" data-i18n="resetTaskBtn">Reset Task</button>
-        <button id="reviewPendingBtn" type="button" class="btn hidden" data-i18n="reviewApprovalBtn">Review &amp; Approve</button>
+        <button id="toggleUploadDrawerBtn" type="button" class="btn secondary small">+ Upload Document (OCR)</button>
       </div>
 
-      <div class="hero-voice-row">
-        <button id="micBtn" type="button" class="btn secondary small" title="Speech to Text (English / Hindi)">🎤 Speak</button>
-        <button id="speakerBtn" type="button" class="btn secondary small" title="Read Agent Response Aloud">🔊 Listen</button>
-        <span id="voiceStatus" class="muted"></span>
-      </div>
-    </section>
-
-    <!-- 4. Goal Composer & Live Chat Card -->
-    <section class="card">
-      <label class="field-label" for="goalInput" data-i18n="goalLabel">Goal or Question</label>
-      <textarea id="goalInput" placeholder="e.g. Apply for post-matric scholarship OR Where is IFSC on passbook?"></textarea>
-
-      <div id="chatFeed" class="feed">
-        <div class="muted" data-i18n="chatEmpty">Submit a goal or ask a visual guide question with the active portal tab.</div>
+      <!-- Quick Inline Passphrase Unlock (visible when locked) -->
+      <div id="quickVaultUnlockRow" class="row" style="margin-top: 6px; margin-bottom: 0;">
+        <input id="quickVaultPassInput" type="password" placeholder="Enter CryptoVault passphrase to unlock..." style="flex: 1;" />
+        <button id="quickUnlockBtn" type="button" class="btn small">Unlock</button>
       </div>
 
-      <!-- Clarification Input Box -->
-      <div id="clarificationBox" class="clarification-box hidden">
-        <div class="field-label" data-i18n="clarificationTitle">Clarification Needed</div>
-        <div id="clarificationQuestion" style="font-weight: 600; margin-bottom: 6px;"></div>
-        <div id="clarificationOptions" class="row" style="margin-bottom: 6px;"></div>
-        <div class="row" style="margin-bottom: 0;">
-          <div style="flex: 1;">
-            <input id="clarificationInput" type="text" placeholder="Type your answer..." />
-          </div>
-          <button id="sendClarificationBtn" type="button" class="btn small" data-i18n="sendClarificationBtn">Send Answer</button>
-        </div>
+      <!-- Horizontal Encrypted Document Chips with Access Checkboxes -->
+      <div id="vaultDocChips" class="vault-chips-row">
+        <span class="muted">No encrypted documents in CryptoVault yet.</span>
       </div>
 
-      <!-- Contextual Bilingual Visual Guide Card -->
-      <div id="visualGuideCard" class="card hidden" style="margin-top: 8px; background: var(--surface-input);">
-        <h2 style="margin-bottom: 4px;">
-          <span id="vgTitle">Visual Guide</span>
-          <span id="vgSampleBadge" class="badge">sample</span>
-        </h2>
-        <p id="vgExplanation" style="margin: 4px 0; color: var(--text-secondary);"></p>
-        <div id="vgImageContainer" style="margin-top: 8px; text-align: center;">
-          <img id="vgAnnotatedImage" style="max-width: 100%; border-radius: 8px; border: 1px solid var(--border-glass); display: none;" alt="Annotated Visual Guide" />
-        </div>
-        <div id="vgCallouts"></div>
-      </div>
-    </section>
-
-    <!-- 5. Stacked Asset-Style Rows: Execution Plan -->
-    <section id="executionPlanBox" class="card hidden">
-      <h2>
-        <span data-i18n="executionPlanTitle">Execution Plan</span>
-        <span id="planCounterPill" class="badge info">0/4</span>
-      </h2>
-      <div id="executionPlanList" class="plan-box"></div>
-    </section>
-
-    <!-- Action-Bound Review Card (FR-027) -->
-    <section id="actionBoundReviewCard" class="card hidden" style="border-color: var(--warn-border); background: rgba(251, 191, 36, 0.06);">
-      <h2>
-        <span data-i18n="reviewCardTitle">Action-Bound Approval Required (FR-027)</span>
-        <span class="badge warn">pending_action_hash</span>
-      </h2>
-      <div style="margin-bottom: 6px;">
-        <span class="field-label" data-i18n="targetDomainLabel">Verified Domain</span>
-        <div id="inlineReviewDomain" class="mono"></div>
-      </div>
-      <div style="margin-bottom: 6px;">
-        <span class="field-label" data-i18n="actionHashLabel">Action-Bound SHA-256 Hash (pending_action_hash)</span>
-        <div id="inlineReviewHash" class="mono"></div>
-      </div>
-      <div id="inlineReviewFields" style="margin-bottom: 8px;"></div>
-      <div class="row" style="justify-content: flex-end; margin-bottom: 0;">
-        <button id="inlineRejectBtn" type="button" class="btn danger small" data-i18n="rejectBtn">Reject</button>
-        <button id="inlineApproveBtn" type="button" class="btn small" data-i18n="approveSubmitBtn">Approve &amp; Submit</button>
-      </div>
-    </section>
-
-    <!-- Stacked Asset-Style Expandable Row: Encrypted Vault & FR-037 Document Upload -->
-    <section class="card">
-      <button id="vaultDrawerToggle" type="button" class="asset-row-trigger" aria-expanded="false" aria-controls="docVaultDrawer">
-        <span class="asset-row-left">
-          <span class="asset-circle-icon" aria-hidden="true">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-              <polyline points="14 2 14 8 20 8"/>
-            </svg>
-          </span>
-          <span>
-            <span class="asset-row-title" data-i18n="docVaultTitle">Document Upload &amp; Verification (FR-037)</span>
-            <div class="asset-row-sub">Encrypted CryptoVault &amp; 4-Stage OCR</div>
-          </span>
-        </span>
-        <span id="validationBadge" class="badge">No Doc</span>
-      </button>
-
+      <!-- Expandable FR-037 Document Upload & 4-Stage OCR Drawer -->
       <div id="docVaultDrawer" class="drawer-panel hidden">
+        <div class="row" style="justify-content: space-between; margin-bottom: 6px;">
+          <span style="font-weight: 600; font-size: 12px;" data-i18n="docVaultTitle">Document Upload &amp; Verification (FR-037)</span>
+          <span id="validationBadge" class="badge">No Doc</span>
+        </div>
         <div class="row">
           <div style="flex: 1 1 42%;">
             <label class="field-label" for="docTypeSelect" data-i18n="docTypeLabel">Document Type</label>
@@ -272,17 +168,119 @@
       </div>
     </section>
 
-    <!-- Submission Receipt Row (FR-061) -->
-    <section class="card">
-      <h2>
-        <span data-i18n="receiptTitle">Submission Receipt (FR-061)</span>
-        <span id="receiptBadge" class="badge">Pending</span>
-      </h2>
-      <div id="receiptBody" class="muted" data-i18n="receiptHint">After final submission, confirmed application_ref_no or unconfirmed warning appears here.</div>
-      <div class="row" style="margin-top: 8px; margin-bottom: 0;">
-        <button id="verifyReceiptBtn" type="button" class="btn secondary small" data-i18n="verifyReceiptBtn">Scan &amp; Verify Receipt</button>
+    <div id="globalAlert" class="status-banner"></div>
+
+    <!-- 3. Center GPT-Style Conversational Copilot & Form Assistant -->
+    <main class="copilot-main">
+      <!-- Live Step Counter & Status Bar -->
+      <div class="copilot-status-strip">
+        <span style="display: inline-flex; align-items: center; gap: 6px;">
+          <span id="taskStateBadge" class="badge">Idle</span>
+          <span id="activeToolBadge" class="badge info hidden">tool: -</span>
+        </span>
+        <span id="planCounterPill" class="badge info">0/4</span>
       </div>
-    </section>
+
+      <!-- Execution Plan Steps (live progress) -->
+      <div id="executionPlanBox" class="card hidden" style="padding: 8px 10px;">
+        <div id="executionPlanList" class="plan-box"></div>
+      </div>
+
+      <!-- Scrollable Chat Stream -->
+      <div id="chatFeed" class="feed copilot-feed">
+        <div class="muted" data-i18n="chatEmpty">Ask any question about this form or tell me to auto-fill fields from your CryptoVault.</div>
+      </div>
+
+      <!-- Inline Frosted-Glass Document Access Consent Prompt -->
+      <div id="docConsentCard" class="consent-card hidden">
+        <div class="consent-title">Document Access Permission</div>
+        <p id="docConsentPromptText" class="consent-text">
+          Allow AI Assistant to access your unlocked CryptoVault documents via 4-Stage OCR to fill this form?
+        </p>
+        <div class="row" style="margin-bottom: 0;">
+          <button id="consentAllowBtn" type="button" class="btn small">Allow &amp; Auto-Fill</button>
+          <button id="consentUploadBtn" type="button" class="btn secondary small">Upload New Doc</button>
+          <button id="consentDismissBtn" type="button" class="btn secondary small">Cancel</button>
+        </div>
+      </div>
+
+      <!-- Clarification Input Box -->
+      <div id="clarificationBox" class="clarification-box hidden">
+        <div class="field-label" data-i18n="clarificationTitle">Clarification Needed</div>
+        <div id="clarificationQuestion" style="font-weight: 600; margin-bottom: 6px;"></div>
+        <div id="clarificationOptions" class="row" style="margin-bottom: 6px;"></div>
+        <div class="row" style="margin-bottom: 0;">
+          <div style="flex: 1;">
+            <input id="clarificationInput" type="text" placeholder="Type your answer..." />
+          </div>
+          <button id="sendClarificationBtn" type="button" class="btn small" data-i18n="sendClarificationBtn">Send Answer</button>
+        </div>
+      </div>
+
+      <!-- Contextual Bilingual Visual Guide Card -->
+      <div id="visualGuideCard" class="card hidden" style="background: var(--surface-input);">
+        <h2 style="margin-bottom: 4px;">
+          <span id="vgTitle">Visual Guide</span>
+          <span id="vgSampleBadge" class="badge">sample</span>
+        </h2>
+        <p id="vgExplanation" style="margin: 4px 0; color: var(--text-secondary);"></p>
+        <div id="vgImageContainer" style="margin-top: 8px; text-align: center;">
+          <img id="vgAnnotatedImage" style="max-width: 100%; border-radius: 8px; border: 1px solid var(--border-glass); display: none;" alt="Annotated Visual Guide" />
+        </div>
+        <div id="vgCallouts"></div>
+      </div>
+
+      <!-- Action-Bound Review Card (FR-027) -->
+      <section id="actionBoundReviewCard" class="card hidden" style="border-color: var(--warn-border); background: rgba(251, 191, 36, 0.06);">
+        <h2>
+          <span data-i18n="reviewCardTitle">Action-Bound Approval Required (FR-027)</span>
+          <span class="badge warn">pending_action_hash</span>
+        </h2>
+        <div style="margin-bottom: 6px;">
+          <span class="field-label" data-i18n="targetDomainLabel">Verified Domain</span>
+          <div id="inlineReviewDomain" class="mono"></div>
+        </div>
+        <div style="margin-bottom: 6px;">
+          <span class="field-label" data-i18n="actionHashLabel">Action-Bound SHA-256 Hash (pending_action_hash)</span>
+          <div id="inlineReviewHash" class="mono"></div>
+        </div>
+        <div id="inlineReviewFields" style="margin-bottom: 8px;"></div>
+        <div class="row" style="justify-content: flex-end; margin-bottom: 0;">
+          <button id="inlineRejectBtn" type="button" class="btn danger small" data-i18n="rejectBtn">Reject</button>
+          <button id="inlineApproveBtn" type="button" class="btn small" data-i18n="approveSubmitBtn">Approve &amp; Submit</button>
+        </div>
+      </section>
+
+      <!-- Submission Receipt Row (FR-061) -->
+      <section class="card" style="padding: 10px;">
+        <h2>
+          <span data-i18n="receiptTitle">Submission Receipt (FR-061)</span>
+          <span id="receiptBadge" class="badge">Pending</span>
+        </h2>
+        <div id="receiptBody" class="muted" data-i18n="receiptHint">After final submission, confirmed application_ref_no or unconfirmed warning appears here.</div>
+        <div class="row" style="margin-top: 6px; margin-bottom: 0;">
+          <button id="verifyReceiptBtn" type="button" class="btn secondary small" data-i18n="verifyReceiptBtn">Scan &amp; Verify Receipt</button>
+        </div>
+      </section>
+    </main>
+
+    <!-- 4. Sticky Bottom Composer (ChatGPT / Perplexity Style) -->
+    <footer class="composer-dock">
+      <div class="composer-box">
+        <textarea id="goalInput" rows="2" placeholder='Ask about this form or say "Fill form"...'></textarea>
+        <div class="composer-bottom-row">
+          <div class="composer-tools">
+            <button id="micBtn" type="button" class="btn secondary small" title="Speech to Text (English / Hindi)">🎤 Speak</button>
+            <button id="speakerBtn" type="button" class="btn secondary small" title="Read Agent Response Aloud">🔊 Listen</button>
+            <button id="inspectGuideBtn" type="button" class="btn secondary small" data-i18n="visualGuideBtn" title="Visual Guide Q&A">Guide</button>
+            <button id="resetTaskBtn" type="button" class="btn secondary small" data-i18n="resetTaskBtn">Reset</button>
+            <button id="reviewPendingBtn" type="button" class="btn secondary small hidden" data-i18n="reviewApprovalBtn">Approve</button>
+          </div>
+          <button id="sendGoalBtn" type="button" class="btn small" data-i18n="runStepBtn">Send</button>
+        </div>
+        <div id="voiceStatus" class="muted" style="margin-top: 4px;"></div>
+      </div>
+    </footer>
   </div>
 
   <!-- Action-Bound Review & Approval Modal (PRD FR-027) -->

@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Universal AI Web Assistant — Portal Router</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="page-wrap">
+    <nav class="nav">
+      <div class="brand">
+        <span class="brand-dot" aria-hidden="true">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2L3 7v6c0 5.25 3.83 10.15 9 11 5.17-.85 9-5.75 9-11V7l-9-5z"/>
+            <path d="M9 12l2 2 4-4"/>
+          </svg>
+        </span>
+        <span>Universal AI Assistant</span>
+      </div>
+      <span class="pill-badge ok">Zero-Leak CryptoVault · Domain Shield</span>
+    </nav>
+
+    <section class="hero">
+      <span class="pill-badge">Bilingual EN + Hinglish · Human-in-the-Loop Safety</span>
+      <h1>Describe your goal. We route you to the official portal safely.</h1>
+      <p>
+        Tell our AI what you need in English or Hinglish. It verifies the official government portal, lists required documents, and hands off seamlessly to your Chrome Extension copilot.
+      </p>
+    </section>
+
+    <!-- 3-Step Visual Note -->
+    <section class="steps-grid" aria-label="How it works">
+      <div class="step-card">
+        <span class="step-num">1</span>
+        <h3>AI Redirects to Official Portal</h3>
+        <p>Describe your problem below. Domain Shield verifies and opens the authentic portal URL.</p>
+      </div>
+      <div class="step-card">
+        <span class="step-num">2</span>
+        <h3>Complete Login / OTP / CAPTCHA</h3>
+        <p>Sign in manually on the official portal yourself for strict human-in-the-loop safety.</p>
+      </div>
+      <div class="step-card">
+        <span class="step-num">3</span>
+        <h3>Launch Chrome Extension Copilot</h3>
+        <p>Open Universal AI Assistant to upload docs via 4-Stage OCR, ask form doubts, and auto-fill safely.</p>
+      </div>
+    </section>
+
+    <!-- Interactive Problem-to-Portal Prompt Bar -->
+    <section class="router-card">
+      <div class="router-header">
+        <h2>Describe Your Problem / Goal</h2>
+        <span id="backendStatusPill" class="pill-badge">API: http://127.0.0.1:8000</span>
+      </div>
+
+      <form id="portalRouterForm" class="prompt-bar">
+        <input
+          id="problemInput"
+          type="text"
+          placeholder='e.g. "Mujhe post-matric scholarship ke liye apply karna hai" or "I need a PAN card"'
+          required
+        />
+        <button id="findPortalBtn" type="submit" class="btn-white">Find Official Portal</button>
+      </form>
+
+      <div class="quick-chips">
+        <button type="button" class="chip" data-prompt="Mujhe post-matric scholarship ke liye apply karna hai">Mujhe post-matric scholarship ke liye apply karna hai</button>
+        <button type="button" class="chip" data-prompt="I need to apply for income certificate">Income Certificate</button>
+        <button type="button" class="chip" data-prompt="Apply for new PAN card">New PAN Card</button>
+        <button type="button" class="chip" data-prompt="I want to apply for passport">Passport Seva</button>
+        <button type="button" class="chip" data-prompt="Open local demo test portal">Local Demo Portal</button>
+      </div>
+
+      <div id="portalResultPanel" class="result-panel hidden">
+        <div class="result-top">
+          <div>
+            <h3 id="resPortalName">Official Portal</h3>
+            <span id="resPortalDomain" class="pill-badge ok">scholarships.gov.in</span>
+          </div>
+          <button id="openPortalBtn" type="button" class="btn-white">Open Official Portal &amp; Launch Assistant ↗</button>
+        </div>
+        <p id="resPortalReason" style="margin: 12px 0 6px 0; color: #d1d5db; font-size: 13.5px;"></p>
+        <div id="resRequiredDocs" class="doc-pills"></div>
+        <ol id="resSteps" class="result-steps"></ol>
+      </div>
+    </section>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

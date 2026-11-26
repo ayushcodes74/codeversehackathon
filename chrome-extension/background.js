@@ -189,6 +189,109 @@ function maskFieldValue(value) {
 // Message Handlers
 // ---------------------------------------------------------------------------
 
+const GOOGLE_SESSION_KEY = 'ua_google_session';
+
+async function getGoogleAccessTokenInteractive() {
+  const manifest =
+    typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.getManifest === 'function'
+      ? chrome.runtime.getManifest()
+      : null;
+  const clientId = manifest && manifest.oauth2 && manifest.oauth2.client_id ? String(manifest.oauth2.client_id) : '';
+  const isPlaceholder = !clientId || clientId.startsWith('YOUR_GOOGLE_CLIENT_ID');
+
+  if (!isPlaceholder && typeof chrome !== 'undefined' && chrome.identity && typeof chrome.identity.getAuthToken === 'function') {
+    return await new Promise((resolve, reject) => {
+      chrome.identity.getAuthToken({ interactive: true }, (token) => {
+        if (chrome.runtime.lastError || !token) {
+          reject(new Error((chrome.runtime.lastError && chrome.runtime.lastError.message) || 'Google Sign-In cancelled.'));
+          return;
+        }
+        resolve(token);
+      });
+    });
+  }
+
+  return `dev_google_token_${Date.now()}`;
+}
+
+async function handleGoogleAuthLogin(msg) {
+  await hydrateSessionState();
+  if (msg.apiBaseUrl) {
+    swState.apiBaseUrl = String(msg.apiBaseUrl).replace(/\/+$/, '');
+  }
+
+  const googleAccessToken = msg.access_token || (await getGoogleAccessTokenInteractive());
+  const data = await apiFetch('/api/v1/auth/google', {
+    method: 'POST',
+    jsonBody: {
+      access_token: googleAccessToken,
+      preferred_language: msg.preferred_language || 'en',
+      dev_email: msg.dev_email || undefined,
+      dev_name: msg.dev_name || undefined,
+    },
+    baseUrl: msg.apiBaseUrl,
+  });
+
+  if (!data || !data.access_token || !data.user_id) {
+    throw new Error('Backend /api/v1/auth/google did not return a valid session.');
+  }
+
+  swState.authToken = data.access_token;
+  swState.userId = String(data.user_id);
+  if (data.profile_id) {
+    swState.profileId = String(data.profile_id);
+  }
+
+  const sessionObj = {
+    user_id: String(data.user_id),
+    profile_id: data.profile_id ? String(data.profile_id) : null,
+    email: data.email || 'citizen@gmail.com',
+    name: data.name || 'Citizen User',
+    picture: data.picture || null,
+    auth_mode: data.auth_mode || 'google_oauth',
+  };
+
+  await sessionSet({ [SESSION_AUTH_TOKEN_KEY]: data.access_token });
+  await persistSessionMeta();
+  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+    await chrome.storage.local.set({ [GOOGLE_SESSION_KEY]: sessionObj });
+  }
+  return { ok: true, session: sessionObj };
+}
+
+async function handleGetAuthSession() {
+  await hydrateSessionState();
+  let session = null;
+  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+    const res = await chrome.storage.local.get([GOOGLE_SESSION_KEY]);
+    session = res ? res[GOOGLE_SESSION_KEY] || null : null;
+  }
+  return { ok: true, session, hasToken: Boolean(swState.authToken) };
+}
+
+async function handleGoogleSignOut() {
+  swState.authToken = '';
+  swState.userId = '';
+  swState.profileId = '';
+  await sessionSet({ [SESSION_AUTH_TOKEN_KEY]: '' });
+  await persistSessionMeta();
+  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+    await chrome.storage.local.remove([
+      GOOGLE_SESSION_KEY,
+      'ua_active_task_id',
+      'ua_filled_fields_summary',
+    ]);
+  }
+  if (typeof chrome !== 'undefined' && chrome.identity && typeof chrome.identity.clearAllCachedAuthTokens === 'function') {
+    try {
+      await new Promise((resolve) => chrome.identity.clearAllCachedAuthTokens(() => resolve()));
+    } catch (_e) {
+      // Ignore revoke errors
+    }
+  }
+  return { ok: true };
+}
+
 async function handleAuthDevLogin(msg) {
   await hydrateSessionState();
   if (msg.apiBaseUrl) {
@@ -863,6 +966,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           method: 'GET',
           baseUrl: msg.apiBaseUrl,
         });
+
+      case 'AUTH_GOOGLE_LOGIN':
+        if (!isTrustedExtensionPage(sender)) {
+          throw new Error('Extension page origin required for AUTH_GOOGLE_LOGIN.');
+        }
+        return handleGoogleAuthLogin(msg);
+
+      case 'GET_AUTH_SESSION':
+        if (!isTrustedExtensionPage(sender)) {
+          throw new Error('Extension page origin required for GET_AUTH_SESSION.');
+        }
+        return handleGetAuthSession();
+
+      case 'AUTH_SIGN_OUT':
+        if (!isTrustedExtensionPage(sender)) {
+          throw new Error('Extension page origin required for AUTH_SIGN_OUT.');
+        }
+        return handleGoogleSignOut();
 
       case 'MAP_FORM_FIELDS': {
         if (!isTrustedExtensionPage(sender)) {

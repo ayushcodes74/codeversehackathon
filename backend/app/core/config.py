@@ -29,6 +29,7 @@ class AppSettings(BaseSettings):
     docs_enabled: bool = True
     include_error_details: bool = False
     jwt_secret_key: SecretStr | None = None
+    google_client_id: str | None = None
     allow_dev_user_header: bool = False
     allow_local_dev_portals: bool = True
 

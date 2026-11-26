@@ -113,8 +113,15 @@ const state = {
   userId: '',
   profileId: '',
   profileSlug: 'self',
+  userName: '',
+  userEmail: '',
+  userPicture: '',
   authenticated: false,
   vaultUnlocked: false,
+  vaultDocs: [],
+  allowedVaultDocTypes: [],
+  docConsentGrantedForTask: false,
+  pendingConsentTurn: null,
   activeTabId: null,
   activeUrl: '',
   activeDomain: '',
@@ -266,6 +273,9 @@ async function resetTaskState() {
   state.currentStepIndex = 0;
   state.taskStatus = 'Idle';
   state.nextTool = null;
+  state.docConsentGrantedForTask = false;
+  state.pendingConsentTurn = null;
+  if (el('docConsentCard')) el('docConsentCard').classList.add('hidden');
   await savePersistedTaskId(null);
 
   el('taskStateBadge').textContent = 'Idle';
@@ -543,55 +553,149 @@ async function refreshDomainShield() {
   }
 }
 
-async function handleConnectDevLogin() {
-  clearAlert();
+function showAuthGate() {
+  const gate = el('authGateView');
+  const ws = el('workspaceView');
+  if (gate) gate.classList.remove('hidden');
+  if (ws) ws.classList.add('hidden');
+}
+
+function showWorkspace(session) {
+  state.userId = session.user_id || '';
+  state.profileId = session.profile_id || '';
+  state.userName = session.name || 'Citizen User';
+  state.userEmail = session.email || '';
+  state.userPicture = session.picture || '';
+  state.authenticated = true;
+
+  const nameNode = el('userProfileName');
+  if (nameNode) nameNode.textContent = state.userName;
+
+  const avatarImg = el('userAvatarImg');
+  const avatarFallback = el('userAvatarFallback');
+  if (state.userPicture && avatarImg) {
+    avatarImg.src = state.userPicture;
+    avatarImg.classList.remove('hidden');
+    if (avatarFallback) avatarFallback.classList.add('hidden');
+  } else if (avatarFallback) {
+    avatarFallback.textContent = (state.userName || 'U').charAt(0).toUpperCase();
+    avatarFallback.classList.remove('hidden');
+    if (avatarImg) avatarImg.classList.add('hidden');
+  }
+
+  const gate = el('authGateView');
+  const ws = el('workspaceView');
+  if (gate) gate.classList.add('hidden');
+  if (ws) ws.classList.remove('hidden');
+}
+
+async function handleGoogleSignIn() {
+  const gateAlert = el('authGateAlert');
+  const btn = el('googleSignInBtn');
+  if (gateAlert) {
+    gateAlert.className = 'status-banner';
+    gateAlert.textContent = '';
+  }
+
+  const gateApiInput = el('authGateApiUrlInput');
+  if (gateApiInput && el('apiBaseUrlInput')) {
+    el('apiBaseUrlInput').value = gateApiInput.value.trim() || 'http://127.0.0.1:8000';
+  }
   const apiBaseUrl = getApiBaseUrl();
   state.apiBaseUrl = apiBaseUrl;
 
-  // Clear any stored task_id and active task state whenever connecting/logging in
-  await resetTaskState();
-
-  let userId = (el('userIdInput').value || '').trim();
-  let profileId = state.profileId || '';
-
-  if (!userId) {
-    const fullName = (el('userFullNameInput').value || '').trim() || 'Citizen User';
-    const email = (el('userEmailInput').value || '').trim() || `citizen_${Date.now()}@example.com`;
-    const authResp = await fetch(`${apiBaseUrl}/api/v1/users/auth`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        google_sub: `ext_${email.toLowerCase()}`,
-        email,
-        full_name: fullName,
-        preferred_language: state.lang,
-      }),
+  if (btn) btn.disabled = true;
+  try {
+    await resetTaskState();
+    const res = await sendBg('AUTH_GOOGLE_LOGIN', {
+      apiBaseUrl,
+      preferred_language: state.lang,
     });
-    if (!authResp.ok) {
-      const text = await authResp.text();
-      throw new Error(`User init failed (HTTP ${authResp.status}): ${text}`);
+    showWorkspace(res.session || {});
+    await Promise.all([refreshDomainShield(), refreshVaultList()]);
+    showAlert(
+      state.lang === 'hi'
+        ? 'Google से सफलतापूर्वक साइन इन हो गया।'
+        : `Signed in as ${state.userName || state.userEmail}.`,
+      'ok'
+    );
+  } catch (err) {
+    if (gateAlert) {
+      gateAlert.textContent = err.message || String(err);
+      gateAlert.className = 'status-banner show err';
     }
-    const userData = await authResp.json();
-    userId = userData.user_id;
-    profileId = userData.profiles && userData.profiles[0] ? userData.profiles[0].id : '';
-    el('userIdInput').value = userId;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function handleSignOut() {
+  await sendBg('AUTH_SIGN_OUT');
+  await resetTaskState();
+  state.userId = '';
+  state.profileId = '';
+  state.userName = '';
+  state.userEmail = '';
+  state.userPicture = '';
+  state.authenticated = false;
+  state.vaultUnlocked = false;
+  state.vaultDocs = [];
+  if (el('vaultLockBadge')) {
+    el('vaultLockBadge').textContent = 'Locked';
+    el('vaultLockBadge').className = 'badge warn';
+  }
+  if (el('quickVaultUnlockRow')) el('quickVaultUnlockRow').classList.remove('hidden');
+  showAuthGate();
+}
+
+function renderVaultDocChips(docs) {
+  const container = el('vaultDocChips');
+  if (!container) return;
+  container.innerHTML = '';
+  if (!docs || docs.length === 0) {
+    const empty = document.createElement('span');
+    empty.className = 'muted';
+    empty.textContent =
+      state.lang === 'hi'
+        ? 'वॉल्ट में अभी कोई दस्तावेज़ नहीं है।'
+        : 'No encrypted documents in CryptoVault yet.';
+    container.appendChild(empty);
+    return;
   }
 
-  const loginRes = await sendBg('AUTH_DEV_LOGIN', {
-    apiBaseUrl,
-    user_id: userId,
-    profile_id: profileId || undefined,
+  if (state.allowedVaultDocTypes.length === 0) {
+    state.allowedVaultDocTypes = docs.map((d) => d.docType);
+  }
+
+  docs.forEach((d) => {
+    const firstMasked = Object.values(d.maskedFields || {})[0];
+    const suffix = firstMasked && firstMasked.maskedValue ? ` ${firstMasked.maskedValue.slice(-6)}` : '';
+    const isChecked = state.allowedVaultDocTypes.includes(d.docType);
+
+    const label = document.createElement('label');
+    label.className = `vault-doc-chip${isChecked ? ' selected' : ''}`;
+
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = isChecked;
+    cb.addEventListener('change', () => {
+      if (cb.checked) {
+        if (!state.allowedVaultDocTypes.includes(d.docType)) {
+          state.allowedVaultDocTypes.push(d.docType);
+        }
+      } else {
+        state.allowedVaultDocTypes = state.allowedVaultDocTypes.filter((t) => t !== d.docType);
+      }
+      label.classList.toggle('selected', cb.checked);
+    });
+
+    const text = document.createElement('span');
+    text.textContent = `${String(d.docType || 'DOC').toUpperCase()}${suffix}`;
+
+    label.appendChild(cb);
+    label.appendChild(text);
+    container.appendChild(label);
   });
-
-  state.userId = loginRes.user_id || userId;
-  state.profileId = profileId;
-  state.taskId = null;
-  state.authenticated = true;
-
-  const authBadge = el('authStatusBadge');
-  authBadge.textContent = `Connected (${String(state.userId).slice(0, 8)}...)`;
-  authBadge.className = 'badge ok';
-  showAlert('Authenticated via AUTH_DEV_LOGIN and HS256 JWT stored in extension session.', 'ok');
 }
 
 async function refreshVaultList(passphraseOverride = undefined) {
@@ -601,7 +705,11 @@ async function refreshVaultList(passphraseOverride = undefined) {
       passphrase: passphraseOverride,
     });
     const docs = res.docs || [];
+    state.vaultDocs = docs;
+    renderVaultDocChips(docs);
+
     const node = el('vaultRecordsList');
+    if (!node) return;
     if (docs.length === 0) {
       node.textContent =
         state.lang === 'hi'
@@ -1634,7 +1742,8 @@ function renderEditableFillReviewTable(fillActions, previewItems) {
 async function runAgentTurn(messageOverride = null, { includeDom = true } = {}) {
   clearAlert();
   if (!state.authenticated || !state.userId) {
-    showAlert('Click "Connect / Dev Login" before running an agent step.', 'warn');
+    showAlert('Please sign in with Google first.', 'warn');
+    showAuthGate();
     return;
   }
 
@@ -1643,6 +1752,25 @@ async function runAgentTurn(messageOverride = null, { includeDom = true } = {}) 
   if (!message) {
     showAlert('Please enter a goal or question.', 'warn');
     return;
+  }
+
+  // Explicit Document Access Consent Prompt before filling fields from CryptoVault
+  const isFillIntent = /\b(fill|auto-fill|autofill|apply|personal|address|aadhaar|pan|bank|bhar|bhare)\b/i.test(message);
+  if (includeDom && isFillIntent && !state.docConsentGrantedForTask && state.vaultDocs && state.vaultDocs.length > 0) {
+    const selectedDocs = state.allowedVaultDocTypes.length > 0
+      ? state.allowedVaultDocTypes
+      : state.vaultDocs.map((d) => d.docType);
+    const consentCard = el('docConsentCard');
+    const consentText = el('docConsentPromptText');
+    if (consentCard && consentText) {
+      consentText.textContent =
+        state.lang === 'hi'
+          ? `क्या आप AI Assistant को आपके अनलॉक CryptoVault से [${selectedDocs.join(', ')}] दस्तावेज़ 4-Stage OCR द्वारा उपयोग करके यह फ़ॉर्म भरने की अनुमति देते हैं?`
+          : `Allow AI Assistant to access [${selectedDocs.join(', ')}] from your unlocked CryptoVault via 4-Stage OCR to fill this form?`;
+      state.pendingConsentTurn = { message, includeDom };
+      consentCard.classList.remove('hidden');
+      return;
+    }
   }
 
   appendFeed('You', message, message);
@@ -1873,9 +2001,58 @@ document.addEventListener('DOMContentLoaded', async () => {
     refreshDomainShield();
   });
 
-  el('authInitBtn').addEventListener('click', () => {
-    handleConnectDevLogin().catch((err) => showAlert(err.message, 'err'));
-  });
+  if (el('googleSignInBtn')) {
+    el('googleSignInBtn').addEventListener('click', () => {
+      handleGoogleSignIn().catch((err) => showAlert(err.message, 'err'));
+    });
+  }
+
+  if (el('signOutBtn')) {
+    el('signOutBtn').addEventListener('click', () => {
+      handleSignOut().catch((err) => showAlert(err.message, 'err'));
+    });
+  }
+
+  if (el('quickUnlockBtn')) {
+    el('quickUnlockBtn').addEventListener('click', async () => {
+      const quickInput = el('quickVaultPassInput');
+      const pass = quickInput ? quickInput.value : '';
+      if (!pass) {
+        showAlert('Enter a vault passphrase to unlock.', 'warn');
+        return;
+      }
+      if (el('vaultPassphraseInput')) el('vaultPassphraseInput').value = pass;
+      if (el('unlockVaultBtn')) el('unlockVaultBtn').click();
+      quickInput.value = '';
+    });
+  }
+
+  if (el('consentAllowBtn')) {
+    el('consentAllowBtn').addEventListener('click', () => {
+      state.docConsentGrantedForTask = true;
+      if (el('docConsentCard')) el('docConsentCard').classList.add('hidden');
+      const pending = state.pendingConsentTurn;
+      state.pendingConsentTurn = null;
+      if (pending) {
+        runAgentTurn(pending.message, { includeDom: pending.includeDom }).catch((err) => showAlert(err.message, 'err'));
+      }
+    });
+  }
+
+  if (el('consentUploadBtn')) {
+    el('consentUploadBtn').addEventListener('click', () => {
+      if (el('docConsentCard')) el('docConsentCard').classList.add('hidden');
+      state.pendingConsentTurn = null;
+      if (el('docVaultDrawer')) el('docVaultDrawer').classList.remove('hidden');
+    });
+  }
+
+  if (el('consentDismissBtn')) {
+    el('consentDismissBtn').addEventListener('click', () => {
+      if (el('docConsentCard')) el('docConsentCard').classList.add('hidden');
+      state.pendingConsentTurn = null;
+    });
+  }
 
   el('unlockVaultBtn').addEventListener('click', async () => {
     clearAlert();
@@ -1890,6 +2067,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       state.vaultUnlocked = Boolean(res.unlocked);
       el('vaultLockBadge').textContent = state.vaultUnlocked ? 'Unlocked' : 'Locked';
       el('vaultLockBadge').className = state.vaultUnlocked ? 'badge ok' : 'badge warn';
+      if (el('quickVaultUnlockRow')) {
+        el('quickVaultUnlockRow').classList.toggle('hidden', state.vaultUnlocked);
+      }
       await refreshVaultList(passphrase);
       showAlert('Extension CryptoVault unlocked in chrome.storage.session.', 'ok');
     } catch (err) {
@@ -1904,6 +2084,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       state.vaultUnlocked = false;
       el('vaultLockBadge').textContent = 'Locked';
       el('vaultLockBadge').className = 'badge warn';
+      if (el('quickVaultUnlockRow')) {
+        el('quickVaultUnlockRow').classList.remove('hidden');
+      }
       showAlert('CryptoVault locked and session passphrase cleared.', 'warn');
     } catch (err) {
       showAlert(err.message, 'err');
@@ -1971,7 +2154,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         mimeType: state.lastMimeType,
         expected_doc_type: el('docTypeSelect').value,
         profile_id: state.profileSlug || 'self',
-        profile_full_name: (el('userFullNameInput').value || '').trim() || undefined,
+        profile_full_name: state.userName || undefined,
         language: state.lang,
       });
 
@@ -2026,7 +2209,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       await sendBg('SAVE_VERIFIED_DOC', {
         profileId: state.profileSlug || 'self',
-        profileDisplayName: (el('userFullNameInput').value || '').trim() || 'Self',
+        profileDisplayName: state.userName || 'Self',
         docType: state.lastExtraction.detected_doc_type,
         source: 'upload',
         extractedFields,
@@ -2060,5 +2243,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     submitApprovalDecision(false).catch((err) => showAlert(err.message, 'err'));
   });
 
-  await Promise.all([loadPersistedTaskId(), refreshDomainShield(), refreshVaultList()]);
+  try {
+    const authState = await sendBg('GET_AUTH_SESSION');
+    if (authState && authState.session && authState.hasToken) {
+      showWorkspace(authState.session);
+      await Promise.all([loadPersistedTaskId(), refreshDomainShield(), refreshVaultList()]);
+    } else {
+      showAuthGate();
+    }
+  } catch (_e) {
+    showAuthGate();
+  }
 });
