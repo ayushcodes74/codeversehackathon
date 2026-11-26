@@ -1,5 +1,6 @@
 """Ownership-enforced Safe-Pause clarification service routing through AgentGateway."""
 
+import inspect
 import logging
 import uuid
 
@@ -97,9 +98,12 @@ async def submit_clarification_answer(
     )
 
     active_gateway = gateway or get_agent_gateway()
-    return await active_gateway.submit_clarification(
-        user_id=caller_user_id,
-        task_id=task.id,
-        current_state=current_state,
-        sanitized_payload=sanitized_payload,
-    )
+    kwargs = {
+        "user_id": caller_user_id,
+        "task_id": task.id,
+        "current_state": current_state,
+        "sanitized_payload": sanitized_payload,
+    }
+    if "db" in inspect.signature(active_gateway.submit_clarification).parameters:
+        kwargs["db"] = db
+    return await active_gateway.submit_clarification(**kwargs)

@@ -75,7 +75,7 @@ class Task(Base):
     portal_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("approved_portals.id", ondelete="SET NULL"))
     goal_text: Mapped[str] = mapped_column(Text, nullable=False)
     target_url: Mapped[str | None] = mapped_column(Text)
-    status: Mapped[str] = mapped_column(String(30), default="in_progress", nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="discovering", nullable=False)
     current_step_index: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     total_steps: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     checkpoint_state: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)

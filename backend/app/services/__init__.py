@@ -3,7 +3,7 @@
 from app.services.agent_gateway import (
     AgentGateway,
     AgentTaskControlResult,
-    UnconfiguredAgentGateway,
+    OrchestratorAgentGateway,
     get_agent_gateway,
 )
 from app.services.auth_context import resolve_authenticated_user_id
@@ -31,7 +31,7 @@ __all__ = [
     "AgentTaskControlResult",
     "InMemorySessionStore",
     "SessionStore",
-    "UnconfiguredAgentGateway",
+    "OrchestratorAgentGateway",
     "apply_task_action",
     "close_session",
     "create_session",

@@ -16,12 +16,11 @@ from sqlalchemy import select
 from app.models import ApprovedPortal, AgentMemory
 from app.schemas.agent_contracts import (
     VerifyDomainOutput,
-    SearchApprovedPortalsOutput,
     ApprovedPortalItem,
     RequestUserInputInput,
 )
 
-# Trusted local development hosts for testing synthetic portals
+# Trusted local development hosts for testing synthetic portals (HTTP/HTTPS only)
 LOCAL_DEV_HOSTS = {"localhost", "127.0.0.1", "::1", "testserver"}
 
 
@@ -29,36 +28,63 @@ def normalize_host(url: str) -> str:
     """Extract and normalize hostname from URL."""
     if not url:
         return ""
-    # If no scheme, add temporary dummy scheme so urlparse handles it properly
     parsed = urlparse(url if "://" in url else f"http://{url}")
-    host = parsed.hostname or ""
-    return host.lower()
+    host = (parsed.hostname or "").strip().lower().rstrip(".")
+    return host.removeprefix("www.")
 
 
 async def check_domain_shield(url: str, db: AsyncSession) -> VerifyDomainOutput:
     """Validates the target URL against the PostgreSQL approved_portals table.
-    
-    Returns VerifyDomainOutput with allowed status and shield classification.
+
+    Blocks file:// and non-HTTP(S) schemes, punycode/IDN homographs, and unregistered domains.
     """
-    if not url:
+    raw = (url or "").strip()
+    if not raw:
         return VerifyDomainOutput(
             is_allowed=False,
             domain="",
             shield_status="BLOCKED_UNOFFICIAL",
-            warning="No URL provided for domain verification."
+            warning="No URL provided for domain verification.",
         )
 
-    host = normalize_host(url)
+    if "://" in raw:
+        scheme = urlparse(raw).scheme.lower()
+        if scheme not in ("http", "https"):
+            return VerifyDomainOutput(
+                is_allowed=False,
+                domain="",
+                shield_status="BLOCKED_UNOFFICIAL",
+                warning=f"URL scheme '{scheme}://' is blocked by Official Domain Shield.",
+            )
 
-    # 1. Allow local dev synthetic demo portal
-    if host in LOCAL_DEV_HOSTS or url.startswith("file://"):
+    host = normalize_host(raw)
+    if not host:
+        return VerifyDomainOutput(
+            is_allowed=False,
+            domain="",
+            shield_status="BLOCKED_UNOFFICIAL",
+            warning="Invalid or unparseable URL.",
+        )
+
+    # Block punycode / non-ASCII IDN homograph domains.
+    labels = host.split(".")
+    if any(lbl.startswith("xn--") for lbl in labels) or not host.isascii():
+        return VerifyDomainOutput(
+            is_allowed=False,
+            domain=host,
+            shield_status="BLOCKED_UNOFFICIAL",
+            warning=f"Punycode or non-ASCII homograph domain '{host}' is blocked by Official Domain Shield.",
+        )
+
+    # 1. Allow local dev synthetic demo portal over HTTP/HTTPS only
+    if host in LOCAL_DEV_HOSTS:
         return VerifyDomainOutput(
             is_allowed=True,
-            domain=host or "localhost",
+            domain=host,
             portal_name="Synthetic Demo Portal",
             category="Development & Testing",
             shield_status="LOCAL_DEV_ALLOWED",
-            warning=None
+            warning=None,
         )
 
     # 2. Query approved_portals in PostgreSQL
@@ -67,8 +93,7 @@ async def check_domain_shield(url: str, db: AsyncSession) -> VerifyDomainOutput:
     portals = result.scalars().all()
 
     for portal in portals:
-        approved_domain = portal.domain.lower().strip()
-        # Exact match or valid official subdomain (e.g., nsp.gov.in matches scholarships.gov.in if listed)
+        approved_domain = portal.domain.lower().strip().removeprefix("www.")
         if host == approved_domain or host.endswith(f".{approved_domain}"):
             return VerifyDomainOutput(
                 is_allowed=True,
@@ -76,7 +101,7 @@ async def check_domain_shield(url: str, db: AsyncSession) -> VerifyDomainOutput:
                 portal_name=portal.portal_name,
                 category=portal.category,
                 shield_status="VERIFIED_OFFICIAL",
-                warning=None
+                warning=None,
             )
 
     # 3. Domain not on whitelist -> Block!
@@ -84,7 +109,7 @@ async def check_domain_shield(url: str, db: AsyncSession) -> VerifyDomainOutput:
         is_allowed=False,
         domain=host,
         shield_status="BLOCKED_UNOFFICIAL",
-        warning=f"Domain '{host}' is NOT on the verified official government portal whitelist. Auto-fill blocked by Domain Shield."
+        warning=f"Domain '{host}' is NOT on the verified official government portal whitelist. Auto-fill blocked by Domain Shield.",
     )
 
 
