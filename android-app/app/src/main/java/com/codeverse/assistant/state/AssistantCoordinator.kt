@@ -414,6 +414,7 @@ class AssistantCoordinator(
         expectedDocType: String
     ): Result<DocumentExtractionResult> = runCatching {
         _uiState.update { it.copy(isBusy = true, errorMessage = null, vaultCommitSaved = false) }
+        ensureAuthenticated().getOrThrow()
         val api = apiProvider.service()
 
         val mediaType = mimeType.toMediaTypeOrNull() ?: "application/octet-stream".toMediaTypeOrNull()

@@ -145,15 +145,20 @@ function getApiBaseUrl() {
 /**
  * Sends a message to `background.js` matching its `{ action, ... }` and `{ ok: true, ... }` contract.
  */
-function sendBg(action, payload = {}) {
+function sendBg(actionOrMsg, payload = {}) {
+  const message =
+    actionOrMsg && typeof actionOrMsg === 'object'
+      ? { action: actionOrMsg.action || actionOrMsg.type, ...actionOrMsg }
+      : { action: actionOrMsg, ...payload };
+  const actionLabel = message.action || message.type || 'unknown';
   return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage({ action, ...payload }, (response) => {
+    chrome.runtime.sendMessage(message, (response) => {
       if (chrome.runtime.lastError) {
         reject(new Error(chrome.runtime.lastError.message));
         return;
       }
       if (!response || response.ok !== true) {
-        reject(new Error((response && response.error) || `Background action '${action}' failed.`));
+        reject(new Error((response && response.error) || `Background action '${actionLabel}' failed.`));
         return;
       }
       resolve(response);
@@ -1711,23 +1716,19 @@ async function previewMappedFormFields(docType, availableFieldKeys) {
   }
 
   try {
-    const resp = await fetch(`${getApiBaseUrl()}/documents/map-fields`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        profile_id: state.profileSlug || 'self',
-        doc_type: docType,
-        available_field_keys: availableFieldKeys,
-        form_fields: domSnapshot.fields.map((f) => ({
-          element_key: f.element_key,
-          label: f.label || f.name || f.id || f.element_key,
-          input_type: f.input_type || 'text',
-          required: Boolean(f.is_required || f.aria_required),
-        })),
-      }),
-    });
-    if (!resp.ok) return;
-    const mapped = await resp.json();
+    const payload = {
+      profile_id: state.profileSlug || 'self',
+      doc_type: docType,
+      available_field_keys: availableFieldKeys,
+      form_fields: domSnapshot.fields.map((f) => ({
+        element_key: f.element_key,
+        label: f.label || f.name || f.id || f.element_key,
+        input_type: f.input_type || 'text',
+        required: Boolean(f.is_required || f.aria_required),
+      })),
+    };
+    const res = await sendBg({ type: 'MAP_FORM_FIELDS', payload, apiBaseUrl: getApiBaseUrl() });
+    const mapped = (res && res.data) || res || {};
     const mappings = Array.isArray(mapped.mappings) ? mapped.mappings : [];
     if (mappings.length === 0) return;
 
