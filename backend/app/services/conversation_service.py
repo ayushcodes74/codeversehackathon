@@ -8,7 +8,7 @@ from fastapi import status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.db_routes import TERMINAL_TASK_STATES, TaskState, verify_caller_ownership
+from app.core.task_state import TERMINAL_TASK_STATES, TaskState
 from app.core.exceptions import AppError, ConflictError, NotFoundError
 from app.models import ConversationMessage, FamilyProfile, Task
 from app.schemas.common import PaginationMeta
@@ -22,6 +22,7 @@ from app.services.sanitization import (
     sanitize_metadata_payload,
     sanitize_text_for_persistence,
 )
+from app.services.auth_context import resolve_authenticated_user_id
 
 logger = logging.getLogger("app.services.conversation")
 
@@ -37,10 +38,10 @@ async def _get_owned_task(
     if task is None:
         raise NotFoundError("Task not found.")
 
-    verify_caller_ownership(
-        str(task.user_id),
+    resolve_authenticated_user_id(
         x_user_id=x_user_id,
         authorization=authorization,
+        expected_user_id=task.user_id,
     )
 
     profile = await db.get(FamilyProfile, task.profile_id)

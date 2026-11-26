@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -28,6 +28,8 @@ class AppSettings(BaseSettings):
 
     docs_enabled: bool = True
     include_error_details: bool = False
+    jwt_secret_key: SecretStr | None = None
+    allow_dev_user_header: bool = False
 
     cors_origins: str | list[str] = Field(
         default_factory=lambda: [

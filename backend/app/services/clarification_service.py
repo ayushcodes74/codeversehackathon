@@ -7,7 +7,7 @@ import uuid
 from fastapi import status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.db_routes import TaskState
+from app.core.task_state import TaskState
 from app.core.exceptions import AppError, ConflictError, NotFoundError
 from app.models import FamilyProfile, Task
 from app.schemas.clarification import (
@@ -98,12 +98,10 @@ async def submit_clarification_answer(
     )
 
     active_gateway = gateway or get_agent_gateway()
-    kwargs = {
-        "user_id": caller_user_id,
-        "task_id": task.id,
-        "current_state": current_state,
-        "sanitized_payload": sanitized_payload,
-    }
-    if "db" in inspect.signature(active_gateway.submit_clarification).parameters:
-        kwargs["db"] = db
-    return await active_gateway.submit_clarification(**kwargs)
+    return await active_gateway.submit_clarification(
+        db=db,
+        user_id=caller_user_id,
+        task_id=task.id,
+        current_state=current_state,
+        sanitized_payload=sanitized_payload,
+    )

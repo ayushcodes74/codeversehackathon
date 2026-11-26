@@ -5,7 +5,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from app.api.db_routes import TaskState
+from app.core.task_state import TaskState
 from app.schemas.clarification import ClarificationPrompt
 from app.schemas.common import (
     DocumentType,

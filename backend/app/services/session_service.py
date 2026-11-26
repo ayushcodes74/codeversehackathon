@@ -12,12 +12,12 @@ import threading
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
 
 from fastapi import status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.db_routes import _extract_canonical_hostname
 from app.core.exceptions import AppError, ConflictError, NotFoundError
 from app.models import ApprovedPortal, FamilyProfile, User
 from app.schemas.session import (
@@ -34,6 +34,21 @@ from app.services.auth_context import resolve_authenticated_user_id
 logger = logging.getLogger("app.services.session")
 
 _DEFAULT_SESSION_TTL = timedelta(hours=24)
+
+
+def _extract_canonical_hostname(raw_input: str) -> str:
+    """Return a normalized hostname only; reject malformed URLs and userinfo."""
+    candidate = (raw_input or "").strip()
+    if not candidate:
+        return ""
+    try:
+        parsed = urlsplit(candidate if "://" in candidate else f"https://{candidate}")
+        if parsed.username or parsed.password:
+            return ""
+        hostname = (parsed.hostname or "").strip().lower().rstrip(".")
+    except ValueError:
+        return ""
+    return hostname.removeprefix("www.")
 
 
 class SessionStore(ABC):

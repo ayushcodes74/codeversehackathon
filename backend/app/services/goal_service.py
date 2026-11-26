@@ -72,13 +72,11 @@ async def submit_goal(
     )
 
     active_gateway = gateway or get_agent_gateway()
-    kwargs = {
-        "user_id": caller_user_id,
-        "profile_id": profile.id,
-        "sanitized_goal_text": sanitized_goal,
-        "payload": payload,
-        "portal_context": portal_context,
-    }
-    if "db" in inspect.signature(active_gateway.submit_goal).parameters:
-        kwargs["db"] = db
-    return await active_gateway.submit_goal(**kwargs)
+    return await active_gateway.submit_goal(
+        db=db,
+        user_id=caller_user_id,
+        profile_id=profile.id,
+        sanitized_goal_text=sanitized_goal,
+        payload=payload,
+        portal_context=portal_context,
+    )
