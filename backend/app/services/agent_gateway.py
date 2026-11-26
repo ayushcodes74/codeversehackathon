@@ -1,22 +1,17 @@
 """Anubhav-owned adapter between frontend APIs and Ayush's orchestration service."""
 
-import json
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from urllib.parse import urlparse
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
+from fastapi import status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.orchestrator import execute_agent_turn
-from app.core.exceptions import BadRequestError, ConflictError, NotFoundError
+from app.core.exceptions import AppError, BadRequestError, ConflictError, NotFoundError
 from app.core.task_state import ALLOWED_STATE_TRANSITIONS, TaskState
-from app.models import AgentMemory, ApprovedPortal, Task
+from app.models import AgentMemory, ApprovedPortal, FamilyProfile, Task, User
 from app.schemas.agent_contracts import AgentChatRequest, AgentStepResponse
 from app.schemas.clarification import (
     ClarificationAnswerRequest,
@@ -36,7 +31,10 @@ from app.schemas.session import (
     SessionPortalContext,
 )
 from app.schemas.task import TaskControlAction
-from app.services.sanitization import sanitize_metadata_payload
+from app.services.sanitization import (
+    sanitize_metadata_payload,
+    sanitize_text_for_persistence,
+)
 
 _MEMORY_CLARIFICATION_KEYS = frozenset(
     {"domicile_state", "state", "education_level", "education"}
@@ -93,6 +91,16 @@ class AgentGateway(ABC):
         reason: str | None = None,
     ) -> AgentTaskControlResult:
         """Request pause or resume where the current contracts can do so safely."""
+
+    @abstractmethod
+    async def run_chat_turn(
+        self,
+        *,
+        db: AsyncSession,
+        caller_user_id: uuid.UUID,
+        payload: AgentChatRequest,
+    ) -> AgentStepResponse:
+        """Run one ownership-verified extension/agent turn through the orchestrator."""
 
 
 def _state_from_agent_response(response: AgentStepResponse, fallback: TaskState) -> TaskState:
@@ -157,8 +165,9 @@ def _save_pending_clarification(task: Task, prompt: ClarificationPrompt | None) 
 class OrchestratorAgentGateway(AgentGateway):
     """Authenticated service adapter calling the existing orchestrator in-process.
 
-    The unauthenticated router contributed by the agent module is not mounted. All calls
-    arrive here only after Anubhav's API service has checked the caller and task/profile.
+    Ayush's ``agent_routes.py`` is intentionally not mounted because it exposes
+    unauthenticated endpoints and skips profile ownership checks. All calls arrive here
+    only after Anubhav's API layer enforces caller, user, profile, and task ownership.
     """
 
     async def submit_goal(
@@ -170,7 +179,6 @@ class OrchestratorAgentGateway(AgentGateway):
         sanitized_goal_text: str,
         payload: GoalSubmitRequest,
         portal_context: SessionPortalContext | None,
-        db: AsyncSession | None = None,
     ) -> GoalSubmitResponse:
         if portal_context is not None and portal_context.support_tier == PortalSupportTier.BLOCKED:
             raise ConflictError(
@@ -243,7 +251,7 @@ class OrchestratorAgentGateway(AgentGateway):
         return GoalSubmitResponse(
             task_id=task.id,
             session_id=payload.session_id,
-            status=TaskState(task.status),
+            status=_parse_task_state(task),
             goal_text=sanitized_goal_text,
             language=payload.language,
             detected_intent=response.intent_lane,
@@ -254,129 +262,6 @@ class OrchestratorAgentGateway(AgentGateway):
             created_at=task.created_at,
         )
 
-        async def _run_submit_goal(session: AsyncSession):
-            step_res = await execute_agent_turn(chat_req, session)
-            nav_act = next(
-                (a for a in step_res.client_actions if a.action_type == "NAVIGATE" and a.value_or_vault_ref),
-                None,
-            )
-            shield_res = None
-            if (
-                not (portal_context and portal_context.is_official)
-                and nav_act
-                and nav_act.value_or_vault_ref
-            ):
-                shield_res = await check_domain_shield(nav_act.value_or_vault_ref, session)
-            return step_res, nav_act, shield_res
-
-        if db is not None:
-            step, nav_action, domain_shield = await _run_submit_goal(db)
-        else:
-            async with AsyncSessionLocal() as session:
-                step, nav_action, domain_shield = await _run_submit_goal(session)
-                await session.commit()
-
-        task_id = step.task_id or uuid.uuid4()
-        try:
-            resolved_state = TaskState(step.status)
-        except ValueError:
-            resolved_state = TaskState.DISCOVERING
-
-        recommended_portal: GoalPortalRecommendation | None = None
-        if portal_context and portal_context.is_official:
-            recommended_portal = GoalPortalRecommendation(
-                portal_name=portal_context.portal_name or portal_context.domain,
-                domain=portal_context.domain,
-                entry_url=payload.current_url or f"https://{portal_context.domain}",
-                support_tier=portal_context.support_tier,
-            )
-        elif nav_action and nav_action.value_or_vault_ref:
-            entry_url = nav_action.value_or_vault_ref
-            parsed_host = (urlparse(entry_url).hostname or "").lower().removeprefix("www.")
-            domain = (domain_shield.domain if domain_shield and domain_shield.domain else parsed_host) or "unknown"
-            if domain_shield and domain_shield.shield_status == "VERIFIED_OFFICIAL":
-                support_tier = (
-                    PortalSupportTier.VERIFIED_OFFICIAL
-                    if domain.endswith((".gov.in", ".nic.in"))
-                    else PortalSupportTier.KNOWN_PORTAL
-                )
-            elif domain_shield and domain_shield.shield_status == "LOCAL_DEV_ALLOWED":
-                support_tier = PortalSupportTier.KNOWN_PORTAL
-            else:
-                support_tier = PortalSupportTier.BLOCKED
-            recommended_portal = GoalPortalRecommendation(
-                portal_name=nav_action.description.replace("Navigating to ", "") or domain,
-                domain=domain,
-                entry_url=entry_url,
-                support_tier=support_tier,
-            )
-
-        clarification_prompt: ClarificationPrompt | None = None
-        if step.response_type == "clarification":
-            tool_in = step.tool_input or {}
-            raw_options = tool_in.get("options") or []
-            options = [
-                ClarificationOption(option_id=f"opt_{idx}", label=str(opt), value=str(opt))
-                for idx, opt in enumerate(raw_options)
-                if str(opt).strip()
-            ]
-            clarification_prompt = ClarificationPrompt(
-                clarification_id=uuid.uuid4(),
-                task_id=task_id,
-                clarification_type=ClarificationType.MISSING_FIELD,
-                question=step.message,
-                field_key=tool_in.get("missing_field_key"),
-                options=options,
-            )
-
-        return GoalSubmitResponse(
-            task_id=task_id,
-            session_id=payload.session_id,
-            status=resolved_state,
-            goal_text=sanitized_goal_text,
-            language=payload.language,
-            detected_intent=step.intent_lane,
-            recommended_portal=recommended_portal,
-            steps_preview=[
-                GoalStepPreview(
-                    step_index=step.current_step_index,
-                    title=step.next_tool or "Goal Discovery",
-                    description=step.message,
-                    requires_user_approval=(step.response_type == "approval_request"),
-                )
-            ],
-            clarification_needed=(step.response_type == "clarification"),
-            clarification=clarification_prompt,
-            created_at=datetime.now(timezone.utc),
-        )
-
-    async def _resolve_clarification_language(
-        self,
-        session: AsyncSession,
-        *,
-        user_id: uuid.UUID,
-        task_id: uuid.UUID,
-        explicit_language: str | None = None,
-    ) -> str:
-        candidate = explicit_language
-        if not candidate:
-            msg_stmt = (
-                select(ConversationMessage.language)
-                .where(ConversationMessage.task_id == task_id)
-                .order_by(ConversationMessage.created_at.desc())
-                .limit(1)
-            )
-            candidate = (await session.execute(msg_stmt)).scalar_one_or_none()
-        if not candidate:
-            user_stmt = select(User.preferred_language).where(User.id == user_id)
-            candidate = (await session.execute(user_stmt)).scalar_one_or_none()
-        if not candidate:
-            return "en"
-        try:
-            return normalize_language_code(candidate)
-        except ValueError:
-            return "en"
-
     async def submit_clarification(
         self,
         *,
@@ -385,9 +270,8 @@ class OrchestratorAgentGateway(AgentGateway):
         task_id: uuid.UUID,
         current_state: TaskState,
         sanitized_payload: ClarificationAnswerRequest,
-        language: str | None = None,
-        db: AsyncSession | None = None,
     ) -> ClarificationAnswerResponse:
+        _ = current_state
         task = await db.get(Task, task_id)
         if task is None or task.user_id != user_id:
             raise NotFoundError("Task not found for authenticated caller.")
@@ -509,37 +393,77 @@ class OrchestratorAgentGateway(AgentGateway):
         reason: str | None = None,
     ) -> AgentTaskControlResult:
         _ = (user_id, task_id, reason)
-        allowed = ALLOWED_STATE_TRANSITIONS.get(current_state, frozenset())
-
-        if action == TaskControlAction.PAUSE:
-            if TaskState.AWAITING_USER_INPUT in allowed:
-                return AgentTaskControlResult(
-                    supported=True,
-                    executed=True,
-                    manual_action_required=False,
-                    next_state=TaskState.AWAITING_USER_INPUT,
-                    message="Task paused safely in awaiting_user_input state.",
-                )
-        elif action == TaskControlAction.RESUME:
-            if TaskState.FILLING in allowed:
-                return AgentTaskControlResult(
-                    supported=True,
-                    executed=True,
-                    manual_action_required=False,
-                    next_state=TaskState.FILLING,
-                    message="Task resumed into filling state.",
-                )
-
         return AgentTaskControlResult(
             supported=False,
             executed=False,
             manual_action_required=True,
             next_state=current_state,
             message=(
-                f"Automatic '{action.value}' needs a fresh client page snapshot and is not "
-                "available through this control request. Reinspect the current page before resuming."
+                f"Automatic '{action.value}' needs a fresh client page snapshot and an active "
+                "orchestration session; perform any pause/resume step manually."
             ),
         )
+
+    async def run_chat_turn(
+        self,
+        *,
+        db: AsyncSession,
+        caller_user_id: uuid.UUID,
+        payload: AgentChatRequest,
+    ) -> AgentStepResponse:
+        user = await db.get(User, caller_user_id)
+        if user is None:
+            raise NotFoundError("Authenticated user record not found.")
+
+        if payload.profile_id is not None:
+            profile = await db.get(FamilyProfile, payload.profile_id)
+            if profile is None:
+                raise NotFoundError("Family profile not found.")
+            if profile.user_id != caller_user_id:
+                raise AppError(
+                    message="Forbidden: profile_id does not belong to this user.",
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    code="forbidden_profile_access",
+                )
+
+        if payload.task_id is not None:
+            task = await db.get(Task, payload.task_id)
+            if task is None:
+                raise NotFoundError("Task not found.")
+            if task.user_id != caller_user_id:
+                raise AppError(
+                    message="Forbidden: caller identity does not match task owner.",
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    code="forbidden_task_access",
+                )
+            task_profile = await db.get(FamilyProfile, task.profile_id)
+            if task_profile is None or task_profile.user_id != caller_user_id:
+                raise AppError(
+                    message="Forbidden: task profile ownership check failed.",
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    code="forbidden_profile_access",
+                )
+            if payload.profile_id is not None and task.profile_id != payload.profile_id:
+                raise ConflictError(
+                    "Requested profile_id does not match the existing task's profile."
+                )
+
+        sanitized_request = payload.model_copy(
+            update={
+                "user_id": caller_user_id,
+                "message": sanitize_text_for_persistence(payload.message),
+            }
+        )
+        try:
+            return await execute_agent_turn(request=sanitized_request, db=db)
+        except PermissionError as exc:
+            raise AppError(
+                message=str(exc),
+                status_code=status.HTTP_403_FORBIDDEN,
+                code="forbidden_agent_access",
+            ) from exc
+        except ValueError as exc:
+            raise BadRequestError(message=str(exc)) from exc
 
 
 _default_agent_gateway = OrchestratorAgentGateway()
