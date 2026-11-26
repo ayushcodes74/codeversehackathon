@@ -752,7 +752,8 @@ function isTrustedExtensionPage(sender) {
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg || typeof msg.action !== 'string') {
+  const actionName = msg && (typeof msg.action === 'string' ? msg.action : typeof msg.type === 'string' ? msg.type : '');
+  if (!msg || !actionName) {
     return false;
   }
   if (!sender || sender.id !== chrome.runtime.id) {
@@ -761,7 +762,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   (async () => {
-    switch (msg.action) {
+    switch (actionName) {
       case 'RESOLVE_VAULT_TOKENS':
         return handleResolveVaultTokens(msg);
 
@@ -844,8 +845,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           baseUrl: msg.apiBaseUrl,
         });
 
+      case 'MAP_FORM_FIELDS': {
+        if (!isTrustedExtensionPage(sender)) {
+          throw new Error('Extension page origin required for MAP_FORM_FIELDS.');
+        }
+        const data = await apiFetch('/documents/map-fields', {
+          method: 'POST',
+          jsonBody: msg.payload || {},
+          baseUrl: msg.apiBaseUrl,
+        });
+        return { ok: true, data };
+      }
+
       default:
-        throw new Error(`Unknown action: ${msg.action}`);
+        throw new Error(`Unknown action: ${actionName}`);
     }
   })()
     .then((result) => sendResponse(result))

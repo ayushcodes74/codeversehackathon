@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Annotated, Any, Dict, List, Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, UploadFile
 from pydantic import BaseModel, Field, ValidationError
 
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -26,6 +26,7 @@ from app.documents.agent_tools import (
     run_map_form_fields_tool,
 )
 from app.policies.log_redactor import SensitiveDataLogFilter, install_log_redaction
+from app.services.auth_context import resolve_authenticated_user_id
 
 logger = logging.getLogger("app.api.documents")
 if not any(isinstance(f, SensitiveDataLogFilter) for f in logger.filters):
@@ -44,6 +45,19 @@ class MapFormFieldsRequest(BaseModel):
     form_fields: List[FormFieldTarget] = Field(default_factory=list)
 
 
+def _require_authenticated_user(
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+) -> str:
+    """Resolve authenticated user ID from Authorization Bearer JWT or dev header."""
+    return str(
+        resolve_authenticated_user_id(
+            x_user_id=x_user_id,
+            authorization=authorization,
+        )
+    )
+
+
 @router.post("/extract-and-validate", response_model=DocumentExtractionResult)
 async def extract_and_validate_document(
     file: Annotated[UploadFile, File(description="Document image or PDF file")],
@@ -52,6 +66,7 @@ async def extract_and_validate_document(
     profile_full_name: Annotated[Optional[str], Form()] = None,
     language: Annotated[str, Form()] = "en",
     portal_constraints_json: Annotated[Optional[str], Form()] = None,
+    user_id: str = Depends(_require_authenticated_user),
 ) -> DocumentExtractionResult:
     """Extract fields and run 4-stage verification strictly in memory."""
     lang_key = (language or "en").strip().lower()
@@ -112,7 +127,10 @@ async def extract_and_validate_document(
 
 
 @router.post("/map-fields", response_model=MapFormFieldsResponse)
-async def map_fields_endpoint(payload: MapFormFieldsRequest) -> MapFormFieldsResponse:
+async def map_fields_endpoint(
+    payload: MapFormFieldsRequest,
+    user_id: str = Depends(_require_authenticated_user),
+) -> MapFormFieldsResponse:
     """Map vault document keys onto discovered DOM form fields via vault: tokens."""
     return run_map_form_fields_tool(
         profile_id=payload.profile_id,
