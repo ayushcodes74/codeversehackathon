@@ -561,11 +561,19 @@ async def execute_agent_turn(
         )
 
     # Case B: Action-Bound Human-in-the-Loop Gate on Review & Final Submit Step (PRD FR-027)
+    # Never treat a page with unfilled editable inputs as final review; Case C must fill them first.
+    has_empty_fillable_fields = any(
+        (f.tag_name or "").lower() in ("input", "select", "textarea")
+        and not f.is_disabled
+        and (f.input_type or "text").lower() not in _NON_FILLABLE_INPUT_TYPES
+        and not (f.current_value and str(f.current_value).strip())
+        for f in dom.fields
+    )
     is_review_step = (
         inspect_out.page_type == "review_page"
         or "step 4" in (dom.step_indicator or "").lower()
         or any("submit" in b.text.lower() for b in dom.buttons)
-    )
+    ) and not has_empty_fillable_fields
 
     has_verified_approval = await _has_verified_submit_approval(db, task.id)
     if is_review_step and not has_verified_approval:
@@ -573,9 +581,17 @@ async def execute_agent_turn(
         btn_sel = submit_btn.selector if submit_btn else "#btn-final-submit"
         btn_txt = submit_btn.text if submit_btn else "Submit Application"
 
-        summary_changes = redact_dict(
-            {f.label or f.element_key: f.current_value or "[Pending]" for f in dom.fields[:6]}
-        )
+        collected_map = {
+            _normalize_field_key(k): str(v)
+            for k, v in ((task.checkpoint_state or {}).get("collected_data") or {}).items()
+            if v is not None and str(v).strip()
+        }
+        raw_summary: dict[str, str] = {}
+        for f in dom.fields[:20]:
+            lbl = f.label or f.element_key
+            val = f.current_value if (f.current_value and str(f.current_value).strip()) else collected_map.get(_normalize_field_key(lbl), "[Pending]")
+            raw_summary[lbl] = val
+        summary_changes = redact_dict(raw_summary)
         req_approval_in = RequestApprovalInput(
             action_type="submit_form",
             summary_of_changes=summary_changes,

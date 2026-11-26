@@ -235,10 +235,14 @@ async def inspect_page_tool(payload: InspectPageInput) -> InspectPageOutput:
 
     text_snippet = (snapshot.text_content_snippet or "").lower()
     indicator = (snapshot.step_indicator or "").lower()
+    has_submit_btn = any(
+        "submit" in (b.text or "").lower() or (b.button_type or "").lower() == "submit"
+        for b in snapshot.buttons
+    )
     page_type = "form_step"
     if any(w in text_snippet or w in indicator for w in ["receipt", "acknowledgement", "app-2026", "submitted successfully", "ack-"]):
         page_type = "acknowledgement_receipt"
-    elif "review" in text_snippet or "review" in indicator or (step_num == total and total > 1 and snapshot.fields):
+    elif "review" in indicator or (step_num == total and total > 1 and (snapshot.fields or has_submit_btn)) or (has_submit_btn and "review" in text_snippet):
         page_type = "review_page"
 
     return InspectPageOutput(
@@ -433,8 +437,8 @@ async def map_form_fields_tool(payload: MapFormFieldsInput) -> MapFormFieldsOutp
 
     # Delegate document-backed field matching to run_map_form_fields_tool (field_mapper.py).
     vault_specs: list[tuple[str, list[str], bool]] = [
-        ("pan", ["pan_number"], True),
-        ("aadhaar", ["id_number"], True),
+        ("aadhaar", ["id_number", "dob", "full_name"], True),
+        ("pan", ["pan_number", "dob", "full_name"], True),
         ("bank_passbook", ["account_number", "ifsc_code"], True),
         ("marksheet", ["roll_number"], False),
         ("income_certificate", ["annual_income"], False),
@@ -446,6 +450,8 @@ async def map_form_fields_tool(payload: MapFormFieldsInput) -> MapFormFieldsOutp
     key_required_cues: dict[str, tuple[str, ...]] = {
         "pan_number": ("pan", "permanent account"),
         "aadhaar_number": ("aadhaar", "aadhar", "uid", "id number"),
+        "dob": ("dob", "d.o.b", "birth", "janm"),
+        "full_name": ("full name", "applicant name", "as per aadhaar", "as per pan", "candidate name", "naam"),
         "account_number": ("account", "a/c", "acct", "khata"),
         "ifsc_code": ("ifsc", "ifs"),
         "roll_number": ("roll", "enrollment", "seat", "registration"),
@@ -464,9 +470,11 @@ async def map_form_fields_tool(payload: MapFormFieldsInput) -> MapFormFieldsOutp
             matched_key = token.rsplit(".", 1)[-1]
             cues = key_required_cues.get(matched_key)
             el_label = label_by_element.get(item.element_key, "")
+            if matched_key in ("aadhaar_number", "pan_number") and any(w in el_label for w in ("name", "naam")):
+                continue
             if cues and not any(cue in el_label for cue in cues):
                 continue
-            is_sensitive = default_sensitive and matched_key != "ifsc_code"
+            is_sensitive = default_sensitive and matched_key not in {"ifsc_code", "dob", "full_name"}
             existing = best_vault_by_element.get(item.element_key)
             if existing is None or item.confidence > existing[2]:
                 best_vault_by_element[item.element_key] = (
@@ -484,12 +492,26 @@ async def map_form_fields_tool(payload: MapFormFieldsInput) -> MapFormFieldsOutp
         confidence = 1.0
 
         vault_match = best_vault_by_element.get(f.element_key)
-        # Prefer explicit memory value for IFSC when available; otherwise use vault token.
+        # Prefer explicit non-sensitive memory values for IFSC, DOB, and full_name when present; otherwise use vault token.
         if vault_match and vault_match[1] == "ifsc_code":
             mem_ifsc = memories.get("ifsc") or memories.get("ifsc_code")
             if mem_ifsc:
                 val_or_ref = mem_ifsc
                 matched_key = "ifsc_code"
+            else:
+                val_or_ref, matched_key, confidence, is_sensitive = vault_match
+        elif vault_match and vault_match[1] == "dob":
+            mem_dob = memories.get("dob") or memories.get("date_of_birth")
+            if mem_dob:
+                val_or_ref = mem_dob
+                matched_key = "dob"
+            else:
+                val_or_ref, matched_key, confidence, is_sensitive = vault_match
+        elif vault_match and vault_match[1] == "full_name" and not ("father" in label or "mother" in label or "guardian" in label):
+            mem_name = memories.get("full_name") or memories.get("name")
+            if mem_name:
+                val_or_ref = mem_name
+                matched_key = "full_name"
             else:
                 val_or_ref, matched_key, confidence, is_sensitive = vault_match
         elif vault_match and not ("bank" in label and "name" in label):
