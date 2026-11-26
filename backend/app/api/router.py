@@ -9,6 +9,7 @@ from app.api.db_routes import router as db_router
 from app.api.documents import router as documents_router
 from app.api.goals import router as goals_router
 from app.api.health import router as health_router
+from app.api.portal_discovery_auth import router as portal_discovery_auth_router
 from app.api.sessions import router as sessions_router
 from app.api.tasks import router as tasks_router
 from app.api.workflows import router as workflows_router
@@ -32,3 +33,4 @@ def register_routers(app: FastAPI, settings: AppSettings) -> None:
     app.include_router(clarifications_router, prefix=settings.api_v1_prefix)
     app.include_router(conversations_router, prefix=settings.api_v1_prefix)
     app.include_router(workflows_router, prefix=settings.api_v1_prefix)
+    app.include_router(portal_discovery_auth_router, prefix=settings.api_v1_prefix)

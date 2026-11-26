@@ -11,6 +11,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from fastapi import Depends, FastAPI
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -63,6 +64,14 @@ def create_app(custom_settings: AppSettings | None = None) -> FastAPI:
     register_middlewares(application, active_settings)
     register_exception_handlers(application, active_settings)
     register_routers(application, active_settings)
+
+    landing_dir = BACKEND_DIR.parent / "landing"
+    if landing_dir.is_dir():
+        application.mount(
+            "/landing",
+            StaticFiles(directory=str(landing_dir), html=True),
+            name="landing",
+        )
 
     @application.get("/health/db", tags=["Health"])
     async def check_db(db: AsyncSession = Depends(get_db)) -> dict[str, str]:

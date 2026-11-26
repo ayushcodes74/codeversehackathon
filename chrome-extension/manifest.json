@@ -8,8 +8,17 @@
     "tabs",
     "scripting",
     "storage",
-    "sidePanel"
+    "sidePanel",
+    "identity"
   ],
+  "oauth2": {
+    "client_id": "730073158016-5kmrkho72b2a21ranopj82uhj9om0tqd.apps.googleusercontent.com",
+    "scopes": [
+      "openid",
+      "email",
+      "profile"
+    ]
+  },
   "host_permissions": [
     "<all_urls>"
   ],
