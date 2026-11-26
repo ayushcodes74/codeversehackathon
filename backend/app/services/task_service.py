@@ -1,6 +1,8 @@
 """Ownership-enforced task query and lifecycle control service reusing Ayush's contracts."""
 
+import hashlib
 import hmac
+import json
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -9,11 +11,10 @@ from fastapi import status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.db_routes import (
+from app.core.task_state import (
     ALLOWED_STATE_TRANSITIONS,
     TERMINAL_TASK_STATES,
     TaskState,
-    _compute_pending_action_hash,
 )
 from app.core.exceptions import AppError, ConflictError, NotFoundError
 from app.models import FamilyProfile, Task, ToolAuditLog
@@ -30,6 +31,15 @@ from app.services.auth_context import resolve_authenticated_user_id
 from app.services.sanitization import sanitize_text_for_persistence
 
 logger = logging.getLogger("app.services.task")
+
+
+def _compute_pending_action_hash(task: Task) -> str:
+    """Bind approval to the current task, profile, portal, step, and checkpoint."""
+    canonical = (
+        f"{task.id}:{task.user_id}:{task.profile_id}:{task.portal_id}:"
+        f"{task.current_step_index}:{json.dumps(task.checkpoint_state or {}, sort_keys=True)}"
+    )
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _parse_canonical_task_state(task: Task) -> TaskState:
@@ -261,7 +271,9 @@ async def apply_task_action(
         )
 
     approved = payload.action == TaskControlAction.APPROVE_SUBMIT
-    next_state = TaskState.SUBMITTED if approved else TaskState.CANCELLED
+    # Approval records permission to proceed; it does not prove the portal submitted.
+    # Keep the task in SUBMITTING until the client returns observable outcome evidence.
+    next_state = TaskState.SUBMITTING if approved else TaskState.CANCELLED
     task.status = next_state.value
     db.add(
         ToolAuditLog(
@@ -297,6 +309,10 @@ async def apply_task_action(
         executed=True,
         manual_action_required=False,
         action_hash=submitted_hash,
-        message="Submission approved." if approved else "Submission rejected and task cancelled.",
+        message=(
+            "Approval recorded. The client must perform the submit action and return evidence."
+            if approved
+            else "Submission rejected and task cancelled."
+        ),
         updated_at=task.updated_at or now,
     )

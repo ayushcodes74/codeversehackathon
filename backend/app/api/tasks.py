@@ -6,7 +6,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Header, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.db_routes import TaskState
+from app.core.task_state import TaskState
 from app.database import get_db
 from app.schemas.task import TaskActionRequest, TaskActionResponse, TaskListResponse
 from app.services.task_service import apply_task_action, list_user_tasks
