@@ -2,6 +2,7 @@
 
 from fastapi import FastAPI
 
+from app.api.agent import router as protected_agent_router
 from app.api.clarifications import router as clarifications_router
 from app.api.conversations import router as conversations_router
 from app.api.db_routes import router as db_router
@@ -22,7 +23,8 @@ def register_routers(app: FastAPI, settings: AppSettings) -> None:
     app.include_router(db_router)
     app.include_router(documents_router)
 
-    # Anubhav-owned Module 4 frontend-facing routes
+    # Anubhav-owned Module 4 frontend-facing routes (never mount unauthenticated agent_routes.py)
+    app.include_router(protected_agent_router, prefix=settings.api_v1_prefix)
     app.include_router(sessions_router, prefix=settings.api_v1_prefix)
     app.include_router(goals_router, prefix=settings.api_v1_prefix)
     app.include_router(tasks_router, prefix=settings.api_v1_prefix)
