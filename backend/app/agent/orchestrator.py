@@ -306,9 +306,9 @@ async def execute_agent_turn(
         answers[answered_key] = reply_text
         parsed_entries = _parse_reply_into_collected_data(reply_text, pending_missing, answered_key)
         collected.update(parsed_entries)
-        checkpoint["clarification_answers"] = answers
-        checkpoint["collected_data"] = collected
-        task.checkpoint_state = checkpoint
+        checkpoint["clarification_answers"] = redact_dict(answers)
+        checkpoint["collected_data"] = redact_dict(collected)
+        task.checkpoint_state = redact_dict(checkpoint)
         task.status = TaskState.FILLING.value
 
         if answered_key in {"domicile_state", "state", "education_level", "education"}:

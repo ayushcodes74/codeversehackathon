@@ -179,11 +179,17 @@ ALLOWED_STATE_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
 
 def _get_jwt_secret() -> str:
     app_settings = get_settings()
-    if app_settings.jwt_secret_key is not None:
-        secret = app_settings.jwt_secret_key.get_secret_value().strip()
-        if secret:
-            return secret
-    return "local-dev-jwt-secret-key-at-least-32-bytes-long-2026"
+    secret = (
+        app_settings.jwt_secret_key.get_secret_value().strip()
+        if app_settings.jwt_secret_key is not None
+        else ""
+    )
+    if len(secret.encode("utf-8")) < 32:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="JWT_SECRET_KEY is not configured",
+        )
+    return secret
 
 
 def _is_production_env() -> bool:
