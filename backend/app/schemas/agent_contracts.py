@@ -9,6 +9,7 @@ All 16 agent tools have strict input/output models conforming to:
 
 from __future__ import annotations
 import uuid
+from datetime import datetime
 from typing import Any, Literal
 from pydantic import BaseModel, Field
 
@@ -88,6 +89,7 @@ class VisualGuideCard(BaseModel):
         description="Reference template id, e.g. 'sample_pan_card', 'sample_bank_passbook', 'sample_aadhaar'"
     )
     bounding_box_callouts: list[CalloutBox] = Field(default_factory=list)
+    annotated_image_url: str | None = Field(default=None, description="Base64 PNG or SVG data URL of rendered synthetic overlay")
     quick_action: Literal["TRIGGER_FILE_PICKER", "FOCUS_INPUT", "OPEN_SAMPLE", "NONE"] = "NONE"
     target_element_key: str | None = None
 
@@ -183,6 +185,11 @@ class ApprovedPortalItem(BaseModel):
     domicile_state: str | None = None
     education_level: str | None = None
     required_doc_types: list[str] = Field(default_factory=list)
+    allowed_paths: list[str] = Field(default_factory=list)
+    source: str | None = "official_gazette"
+    owner: str | None = "Govt of India"
+    review_date: datetime | None = None
+    support_tier: str = "verified_official"
 
 
 class SearchApprovedPortalsOutput(BaseModel):
@@ -205,6 +212,9 @@ class VerifyDomainOutput(BaseModel):
     category: str | None = None
     shield_status: Literal["VERIFIED_OFFICIAL", "BLOCKED_UNOFFICIAL", "LOCAL_DEV_ALLOWED"]
     warning: str | None = None
+    allowed_paths: list[str] = Field(default_factory=list)
+    support_tier: str | None = None
+    redirect_chain: list[str] = Field(default_factory=list)
 
 
 # 5. inspect_page
