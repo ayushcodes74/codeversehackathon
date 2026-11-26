@@ -1,5 +1,17 @@
-from fastapi import FastAPI, Depends
-from fastapi.middleware.cors import CORSMiddleware
+"""FastAPI application factory for the Universal AI Web Assistant backend."""
+
+import logging
+import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(BACKEND_DIR))
+
+from fastapi import Depends, FastAPI
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.router import register_routers
@@ -8,47 +20,27 @@ from app.core.exceptions import register_exception_handlers
 from app.core.logging import configure_logging
 from app.core.middleware import register_middlewares
 from app.database import get_db
-from app.models import ApprovedPortal
-from app.api.db_routes import router as db_router
-from app.api.agent_routes import router as agent_router
+from app.policies.log_redactor import redact_sensitive_text
 
-app = FastAPI(
-    title="Universal AI Web Assistant API",
-    version="3.0.0",
-    description="Zero-Leak Hybrid AI Web Assistant API & Browser Automation Layer"
-)
-
-# Enable CORS for Chrome Extension and Demo Portal communication
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.include_router(db_router)
-app.include_router(agent_router)
-
-
-@asynccontextmanager
-async def lifespan(app_instance: FastAPI):
-    """Manage FastAPI startup and shutdown lifecycle hooks."""
-    active_settings = getattr(app_instance.state, "settings", None) or get_settings()
-    logger.info(
-        "Starting %s v%s in %s mode",
-        active_settings.app_name,
-        active_settings.app_version,
-        active_settings.app_env,
-    )
-    yield
-    logger.info("Shutting down %s", active_settings.app_name)
+logger = logging.getLogger("app")
 
 
 def create_app(custom_settings: AppSettings | None = None) -> FastAPI:
-    """Create and configure the FastAPI application instance."""
+    """Create one configured app instance without shadow apps or wildcard CORS."""
     active_settings = custom_settings or get_settings()
     configure_logging(active_settings.log_level)
+
+    @asynccontextmanager
+    async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+        app_settings = getattr(application.state, "settings", active_settings)
+        logger.info(
+            "Starting %s v%s in %s mode",
+            app_settings.app_name,
+            app_settings.app_version,
+            app_settings.app_env,
+        )
+        yield
+        logger.info("Shutting down %s", app_settings.app_name)
 
     application = FastAPI(
         title=active_settings.app_name,
@@ -68,17 +60,14 @@ def create_app(custom_settings: AppSettings | None = None) -> FastAPI:
     register_routers(application, active_settings)
 
     @application.get("/health/db", tags=["Health"])
-    async def check_db(db: AsyncSession = Depends(get_db)):
-        """Verify PostgreSQL connectivity via SELECT 1 without unhandled 500s."""
+    async def check_db(db: AsyncSession = Depends(get_db)) -> dict[str, str]:
+        """Check database connectivity without exposing driver exception details."""
         try:
             await db.execute(text("SELECT 1"))
             return {"status": "connected", "database": "ok"}
         except Exception as exc:
-            return {
-                "status": "unhealthy",
-                "database": "error",
-                "detail": redact_sensitive_text(str(exc)),
-            }
+            logger.warning("Database readiness query failed: %s", redact_sensitive_text(str(exc)))
+            return {"status": "unhealthy", "database": "error"}
 
     return application
 
