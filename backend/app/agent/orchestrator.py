@@ -11,6 +11,7 @@ Implements the Observe -> Plan -> Select Tool -> Execute -> Verify state machine
 
 from __future__ import annotations
 
+import re
 import uuid
 
 from sqlalchemy import desc, select
@@ -38,11 +39,70 @@ from app.schemas.agent_contracts import (
     AgentStepResponse,
     CaptureReceiptInput,
     ClientAction,
+    FieldMapping,
     FillFormFieldsInput,
     InspectPageInput,
     MapFormFieldsInput,
     RequestApprovalInput,
 )
+
+_NON_FILLABLE_INPUT_TYPES = frozenset(
+    {"hidden", "submit", "button", "reset", "file", "checkbox", "radio", "image"}
+)
+
+
+def _normalize_field_key(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", (text or "").strip().lower()).strip("_")
+
+
+def _parse_reply_into_collected_data(
+    reply_text: str,
+    pending_fields: list[str],
+    fallback_key: str,
+) -> dict[str, str]:
+    """Parse user clarification reply (single, key:value pairs, or comma-separated) into normalized keys."""
+    parsed: dict[str, str] = {}
+    cleaned = reply_text.strip()
+    if not cleaned:
+        return parsed
+
+    parsed[fallback_key] = cleaned
+
+    # Try explicit key: value or key = value segments (separated by newline, comma, or semicolon)
+    segments = [seg.strip() for seg in re.split(r"[\n;]+|,(?=\s*[A-Za-z][^,:]{0,40}[:=])", cleaned) if seg.strip()]
+    matched_kv = False
+    for seg in segments:
+        kv = re.match(r"^([A-Za-z0-9 _/-]{1,50})\s*[:=]\s*(.+)$", seg)
+        if kv:
+            raw_k, raw_v = kv.group(1).strip(), kv.group(2).strip()
+            norm_k = _normalize_field_key(raw_k)
+            if norm_k and raw_v:
+                parsed[norm_k] = raw_v
+                matched_kv = True
+
+    if matched_kv:
+        # Also map onto matching pending_fields normalized keys if suffix/prefix matches
+        for lbl in pending_fields:
+            lbl_key = _normalize_field_key(lbl)
+            if lbl_key not in parsed:
+                for k, v in list(parsed.items()):
+                    if k and (k in lbl_key or lbl_key in k):
+                        parsed[lbl_key] = v
+                        break
+        return parsed
+
+    # If multiple pending fields were asked and user replied comma-separated values cleanly
+    if len(pending_fields) > 1:
+        parts = [p.strip() for p in re.split(r"[,;\n]+", cleaned) if p.strip()]
+        if len(parts) == len(pending_fields):
+            for lbl, val in zip(pending_fields, parts):
+                parsed[_normalize_field_key(lbl)] = val
+            return parsed
+
+    if len(pending_fields) == 1:
+        parsed[_normalize_field_key(pending_fields[0])] = cleaned
+
+    return parsed
 
 _ACTIVE_TASK_STATUSES = tuple(
     s.value for s in TaskState if s not in TERMINAL_TASK_STATES
@@ -232,8 +292,51 @@ async def execute_agent_turn(
         target_url=url,
     )
 
-    # 3. If no DOM snapshot is provided, discover/narrow portal
-    if not dom:
+    # Record user reply into collected_data / clarification_answers and advance AWAITING_USER_INPUT -> FILLING
+    has_visible_form_fields = bool(dom and getattr(dom, "fields", None) and len(dom.fields) > 0)
+    answered_clarification_key: str | None = None
+    if task.status == TaskState.AWAITING_USER_INPUT.value and user_msg.strip():
+        checkpoint = dict(task.checkpoint_state or {})
+        pending_missing = list(checkpoint.pop("pending_missing_fields", None) or [])
+        answered_key = str(checkpoint.pop("pending_clarification_key", None) or "user_reply")
+        answered_clarification_key = answered_key
+        answers = dict(checkpoint.get("clarification_answers") or {})
+        collected = dict(checkpoint.get("collected_data") or {})
+        reply_text = user_msg.strip()
+        answers[answered_key] = reply_text
+        parsed_entries = _parse_reply_into_collected_data(reply_text, pending_missing, answered_key)
+        collected.update(parsed_entries)
+        checkpoint["clarification_answers"] = answers
+        checkpoint["collected_data"] = collected
+        task.checkpoint_state = checkpoint
+        task.status = TaskState.FILLING.value
+
+        if answered_key in {"domicile_state", "state", "education_level", "education"}:
+            mem_stmt = select(AgentMemory).where(
+                AgentMemory.user_id == request.user_id,
+                AgentMemory.profile_id == task.profile_id,
+                AgentMemory.fact_key == answered_key,
+            )
+            existing_mem = (await db.execute(mem_stmt)).scalar_one_or_none()
+            if existing_mem:
+                existing_mem.fact_value = reply_text
+                existing_mem.category = "clarification"
+                existing_mem.source = "user_confirmed"
+            else:
+                db.add(
+                    AgentMemory(
+                        user_id=request.user_id,
+                        profile_id=task.profile_id,
+                        category="clarification",
+                        fact_key=answered_key,
+                        fact_value=reply_text,
+                        source="user_confirmed",
+                    )
+                )
+        await db.flush()
+
+    # 3. Skip discovery questions completely if form DOM snapshot already has visible fields.
+    if not dom or (not has_visible_form_fields and not getattr(dom, "buttons", None) and not (getattr(dom, "text_content_snippet", "") or "").strip()):
         portal_item, clarify_q, disc_msg = await discover_or_narrow_portal(
             user_id=request.user_id,
             profile_id=task.profile_id,
@@ -242,7 +345,19 @@ async def execute_agent_turn(
             db=db,
         )
 
-        if clarify_q:
+        # Do not loop back into clarification if the task just received a user reply or already answered this key.
+        same_or_answered = (
+            clarify_q is not None
+            and (
+                answered_clarification_key == clarify_q.missing_field_key
+                or clarify_q.missing_field_key in ((task.checkpoint_state or {}).get("clarification_answers") or {})
+                or answered_clarification_key is not None
+            )
+        )
+        if clarify_q and not same_or_answered:
+            checkpoint = dict(task.checkpoint_state or {})
+            checkpoint["pending_clarification_key"] = clarify_q.missing_field_key
+            task.checkpoint_state = checkpoint
             task.status = TaskState.AWAITING_USER_INPUT.value
             await db.flush()
             return AgentStepResponse(
@@ -258,7 +373,7 @@ async def execute_agent_turn(
                 status=task.status,
             )
 
-        if portal_item:
+        if portal_item and answered_clarification_key is None:
             task.portal_id = portal_item.id
             task.target_url = portal_item.entry_url
             task.status = TaskState.NAVIGATING.value
@@ -279,6 +394,20 @@ async def execute_agent_turn(
                 client_actions=[nav_action],
                 current_step_index=1,
                 total_steps=4,
+                status=task.status,
+            )
+
+        if answered_clarification_key is not None:
+            task.status = TaskState.FILLING.value
+            await db.flush()
+            return AgentStepResponse(
+                task_id=task.id,
+                response_type="action",
+                intent_lane="form_automation",
+                message="Clarification saved. Advancing to form filling — open or inspect the form page.",
+                message_hi="जानकारी सहेजी गई। फॉर्म भरने के लिए तैयार — कृपया फॉर्म पेज खोलें।",
+                current_step_index=task.current_step_index,
+                total_steps=task.total_steps,
                 status=task.status,
             )
 
@@ -546,13 +675,113 @@ async def execute_agent_turn(
 
     # Case C: Form Step Automation (Map & Fill Fields)
     profile_slug, memories = await fetch_profile_memories(db, task.user_id, task.profile_id)
+    checkpoint_data = dict(task.checkpoint_state or {})
+    collected_data = {
+        _normalize_field_key(k): str(v)
+        for k, v in (checkpoint_data.get("collected_data") or {}).items()
+        if v is not None and str(v).strip()
+    }
+    combined_memories = dict(memories)
+    for c_key, c_val in collected_data.items():
+        combined_memories[c_key] = c_val
+        if c_key in ("pin_code", "postal_code"):
+            combined_memories["pincode"] = c_val
+        elif c_key in ("annual_family_income", "family_income"):
+            combined_memories["annual_income"] = c_val
+        elif c_key == "domicile_state":
+            combined_memories["state"] = c_val
 
     map_in = MapFormFieldsInput(
         fields=dom.fields,
         profile_slug=profile_slug,
-        available_memories=memories,
+        available_memories=combined_memories,
     )
     map_out = await map_form_fields_tool(map_in)
+
+    # Supplement map_out with direct normalized label matches from collected_data
+    mapped_element_keys = {m.element_key for m in map_out.mappings}
+    extra_mappings: list[FieldMapping] = []
+    for f in dom.fields:
+        if f.element_key in mapped_element_keys or f.is_disabled:
+            continue
+        if (f.input_type or "text").lower() in _NON_FILLABLE_INPUT_TYPES:
+            continue
+        raw_label = f.label or f.name or f.placeholder or f.id or ""
+        norm_label = _normalize_field_key(raw_label)
+        matched_val = collected_data.get(norm_label)
+        if matched_val is None and norm_label:
+            for c_key, c_val in collected_data.items():
+                if c_key and c_key != "user_reply" and (c_key == norm_label or c_key in norm_label or norm_label in c_key):
+                    matched_val = c_val
+                    break
+        if matched_val:
+            extra_mappings.append(
+                FieldMapping(
+                    element_key=f.element_key,
+                    field_label=raw_label or f.element_key,
+                    selector=f.selector,
+                    matched_fact_key=norm_label,
+                    value_or_vault_ref=matched_val,
+                    is_sensitive=False,
+                    confidence=0.95,
+                    field_type=f.input_type or "text",
+                )
+            )
+            mapped_element_keys.add(f.element_key)
+
+    all_mappings = list(map_out.mappings) + extra_mappings
+
+    # Check whether any visible/required fillable form field still has no value or vault mapping
+    missing_labels: list[str] = []
+    for f in dom.fields:
+        if f.element_key in mapped_element_keys or f.is_disabled:
+            continue
+        if (f.input_type or "text").lower() in _NON_FILLABLE_INPUT_TYPES:
+            continue
+        if f.current_value and str(f.current_value).strip():
+            continue
+        label_text = (f.label or f.name or f.placeholder or f.id or f.element_key).strip()
+        if label_text and label_text not in missing_labels:
+            missing_labels.append(label_text)
+
+    if missing_labels:
+        if len(missing_labels) > 2:
+            missing_joined = f"{', '.join(missing_labels[:-1])}, and {missing_labels[-1]}"
+        elif len(missing_labels) == 2:
+            missing_joined = f"{missing_labels[0]} and {missing_labels[1]}"
+        else:
+            missing_joined = missing_labels[0]
+        msg_en = f"Please provide your {missing_joined} to complete {inspect_out.active_step}."
+        msg_hi = f"{inspect_out.active_step} पूरा करने के लिए कृपया अपना {missing_joined} बताएं।"
+        task.status = TaskState.AWAITING_USER_INPUT.value
+        task.checkpoint_state = {
+            **checkpoint_data,
+            "step": inspect_out.current_step_number,
+            "step_name": inspect_out.active_step,
+            "url": url,
+            "pending_missing_fields": missing_labels,
+            "pending_clarification_key": _normalize_field_key(missing_labels[0]),
+        }
+        await db.flush()
+        return AgentStepResponse(
+            task_id=task.id,
+            response_type="clarification",
+            intent_lane="form_automation",
+            message=msg_hi if lang == "hi" else msg_en,
+            message_hi=msg_hi,
+            next_tool="request_user_input",
+            tool_input={
+                "missing_field_key": _normalize_field_key(missing_labels[0]),
+                "missing_fields": missing_labels,
+                "question_en": msg_en,
+                "question_hi": msg_hi,
+            },
+            checkpoint_saved=True,
+            current_step_index=inspect_out.current_step_number,
+            total_steps=inspect_out.total_steps,
+            status=task.status,
+        )
+
     await audit_log_tool_call(
         db,
         task.id,
@@ -562,7 +791,7 @@ async def execute_agent_turn(
         map_out.model_dump(),
     )
 
-    fill_in = FillFormFieldsInput(mappings=map_out.mappings)
+    fill_in = FillFormFieldsInput(mappings=all_mappings)
     fill_out = await fill_form_fields_tool(fill_in)
     await audit_log_tool_call(
         db,
@@ -577,10 +806,11 @@ async def execute_agent_turn(
     task.current_step_index = inspect_out.current_step_number
     task.total_steps = inspect_out.total_steps
     task.checkpoint_state = {
+        **checkpoint_data,
         "step": inspect_out.current_step_number,
         "step_name": inspect_out.active_step,
         "url": url,
-        "mapped_fields_count": len(map_out.mappings),
+        "mapped_fields_count": len(all_mappings),
         "sensitive_fields_count": map_out.sensitive_fields_count,
     }
     await db.flush()

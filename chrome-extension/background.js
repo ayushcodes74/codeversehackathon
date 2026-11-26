@@ -468,6 +468,138 @@ async function handleApproveTask(msg) {
   return { ok: true, approval: approvalResp, tab_response: tabResponse };
 }
 
+function formatSafePreviewValue(canonicalToken, value) {
+  const str = String(value ?? '');
+  if (!str) return '';
+  const lowerToken = String(canonicalToken || '').toLowerCase();
+  if (lowerToken.includes('aadhaar')) {
+    return '[Aadhaar Redacted]';
+  }
+  if (lowerToken.includes('.pan.') || lowerToken.endsWith('pan_number')) {
+    if (str.length >= 6) {
+      return `${str.slice(0, 5)}****${str.slice(-1)}`;
+    }
+    return maskFieldValue(str);
+  }
+  if (lowerToken.includes('account_number')) {
+    return maskFieldValue(str);
+  }
+  return str;
+}
+
+async function handlePreviewVaultFields(msg) {
+  await hydrateSessionState();
+  const vault = globalThis.CryptoVault;
+  if (!vault || typeof vault.resolveVaultToken !== 'function' || typeof vault.standardizeVaultToken !== 'function') {
+    throw new Error('CryptoVault runtime is unavailable in service worker.');
+  }
+
+  const passphrase = await resolvePassphrase(msg);
+  if (!passphrase) {
+    return { ok: true, previews: {}, locked: true };
+  }
+
+  const tokens = Array.isArray(msg.tokens) ? msg.tokens : [];
+  const previews = {};
+  for (const rawToken of tokens) {
+    if (typeof rawToken !== 'string' || !rawToken.startsWith('vault:')) {
+      continue;
+    }
+    try {
+      const canonical = vault.standardizeVaultToken(rawToken);
+      const resolved = await vault.resolveVaultToken(canonical, {
+        passphrase,
+        allowUnverified: false,
+      });
+      if (resolved !== null && resolved !== undefined) {
+        const preview = formatSafePreviewValue(canonical, resolved);
+        previews[rawToken] = preview;
+        previews[canonical] = preview;
+      }
+    } catch (err) {
+      previews[rawToken] = `[Locked / Unverified: ${err && err.message ? err.message : 'FR-037'}]`;
+    }
+  }
+
+  return { ok: true, previews, locked: false };
+}
+
+function isSensitivePreviewToken(token, flag) {
+  if (flag) return true;
+  const lower = String(token || '').toLowerCase();
+  return lower.includes('pan') || lower.includes('aadhaar') || lower.includes('account_number');
+}
+
+async function handlePreviewVaultActions(msg) {
+  await hydrateSessionState();
+  const vault = globalThis.CryptoVault;
+  const actions = Array.isArray(msg.actions) ? msg.actions : [];
+  const passphrase = await resolvePassphrase(msg);
+  const items = [];
+
+  for (let idx = 0; idx < actions.length; idx += 1) {
+    const act = actions[idx];
+    if (!act || act.action_type !== 'FILL_FIELD') {
+      continue;
+    }
+
+    const actionId = String(act.element_key || act.selector || `field_${idx}`);
+    const selector = String(act.selector || '');
+    const rawDesc = String(act.description || '').trim();
+    const label =
+      act.field_label ||
+      act.label ||
+      (rawDesc.replace(/^(?:Fill(?:ing)?|Enter|Map(?:ped)?)\s+/i, '').trim() || selector || actionId);
+    const ref = String(act.value_or_vault_ref || '');
+    const sensitive = isSensitivePreviewToken(ref, Boolean(act.is_sensitive));
+
+    let value = '';
+    let maskedValue = '';
+    let error = null;
+
+    if (ref.startsWith('vault:')) {
+      if (!passphrase) {
+        error = 'Vault locked: unlock passphrase in Side Panel';
+      } else if (!vault || typeof vault.resolveVaultToken !== 'function') {
+        error = 'CryptoVault unavailable';
+      } else {
+        try {
+          const canonical = vault.standardizeVaultToken(ref);
+          const resolved = await vault.resolveVaultToken(canonical, {
+            passphrase,
+            allowUnverified: false,
+          });
+          if (resolved !== null && resolved !== undefined) {
+            value = String(resolved);
+            maskedValue = formatSafePreviewValue(canonical, resolved);
+          } else {
+            error = 'Not found in encrypted CryptoVault';
+          }
+        } catch (err) {
+          error = err && err.message ? err.message : 'Verification required (FR-037)';
+        }
+      }
+    } else {
+      value = ref;
+      maskedValue = sensitive ? maskFieldValue(ref) : ref;
+    }
+
+    items.push({
+      action_id: actionId,
+      element_key: act.element_key || null,
+      selector,
+      label,
+      token: ref,
+      value,
+      maskedValue: maskedValue || (sensitive ? '****' : value),
+      isSensitive: sensitive,
+      error,
+    });
+  }
+
+  return { ok: true, items, locked: !passphrase };
+}
+
 async function handleAuthorizeFieldFill(msg) {
   await hydrateSessionState();
   const taskId = String(msg.task_id || '').trim();
@@ -619,6 +751,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         return handleAgentChatStep(msg);
 
+      case 'PREVIEW_VAULT_FIELDS':
+        if (!isTrustedExtensionPage(sender)) {
+          throw new Error('Extension page origin required for PREVIEW_VAULT_FIELDS.');
+        }
+        return handlePreviewVaultFields(msg);
+
+      case 'PREVIEW_VAULT_ACTIONS':
+        if (!isTrustedExtensionPage(sender)) {
+          throw new Error('Extension page origin required for PREVIEW_VAULT_ACTIONS.');
+        }
+        return handlePreviewVaultActions(msg);
+
       case 'AUTHORIZE_FIELD_FILL':
         if (!isTrustedExtensionPage(sender)) {
           throw new Error('Extension page origin required for AUTHORIZE_FIELD_FILL.');
@@ -630,6 +774,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           throw new Error('Extension page origin required for APPROVE_TASK.');
         }
         return handleApproveTask(msg);
+
+      case 'GET_TASK':
+        if (!isTrustedExtensionPage(sender)) {
+          throw new Error('Extension page origin required for GET_TASK.');
+        }
+        return apiFetch(`/api/v1/tasks/${encodeURIComponent(String(msg.task_id || '').trim())}`, {
+          method: 'GET',
+          baseUrl: msg.apiBaseUrl,
+        });
 
       default:
         throw new Error(`Unknown action: ${msg.action}`);

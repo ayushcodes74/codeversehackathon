@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">JanSahayak AI</string>
+    <string name="accessibility_service_label">JanSahayak Portal Reader &amp; Automator</string>
+    <string name="accessibility_service_description">Reads active mobile browser form controls into a structured DOM snapshot and performs user-authorized field fills and submit clicks.</string>
+    <string name="bubble_notification_channel_name">Floating Assistant Bubble</string>
+    <string name="bubble_notification_title">JanSahayak AI Assistant Active</string>
+    <string name="bubble_notification_text">Tap the floating bubble over your browser to capture screen, verify documents, or approve submit.</string>
+</resources>

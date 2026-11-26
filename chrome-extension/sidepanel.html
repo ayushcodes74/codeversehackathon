@@ -222,7 +222,45 @@
       background: #f1f5f9;
       padding: 4px 6px;
       border-radius: 4px;
-      word-break: break-all;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .review-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 6px;
+      font-size: 11px;
+      background: #ffffff;
+    }
+    .review-table th,
+    .review-table td {
+      border: 1px solid var(--border);
+      padding: 5px 6px;
+      text-align: left;
+      vertical-align: top;
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+    .review-table th {
+      background: #f1f5f9;
+      color: var(--muted);
+      font-weight: 600;
+    }
+    .edit-review-cell {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .edit-review-input {
+      flex: 1;
+      min-width: 90px;
+      padding: 4px 6px;
+      font-size: 11px;
+    }
+    .toggle-vis-btn {
+      padding: 3px 6px;
+      font-size: 10px;
+      white-space: nowrap;
     }
     .hidden { display: none !important; }
     .muted { color: var(--muted); font-size: 11px; }
@@ -308,6 +346,7 @@
     <textarea id="goalInput" placeholder="e.g. Apply for post-matric scholarship OR Where is IFSC on passbook?"></textarea>
     <div class="row" style="margin-top: 6px;">
       <button id="sendGoalBtn" type="button" class="btn" data-i18n="runStepBtn">Run Step</button>
+      <button id="resetTaskBtn" type="button" class="btn secondary" data-i18n="resetTaskBtn">Reset Task</button>
       <button id="inspectGuideBtn" type="button" class="btn secondary" data-i18n="visualGuideBtn">Visual Guide Q&amp;A</button>
       <button id="reviewPendingBtn" type="button" class="btn secondary hidden" data-i18n="reviewApprovalBtn">Review &amp; Approve</button>
     </div>

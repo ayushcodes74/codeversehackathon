@@ -44,6 +44,7 @@ const I18N = {
     executionPlanTitle: 'Execution Plan',
     goalLabel: 'Goal or Question',
     runStepBtn: 'Run Step',
+    resetTaskBtn: 'Reset Task',
     visualGuideBtn: 'Visual Guide Q&A',
     reviewApprovalBtn: 'Review & Approve',
     clarificationTitle: 'Clarification Needed',
@@ -82,6 +83,7 @@ const I18N = {
     executionPlanTitle: 'निष्पादन योजना (Execution Plan)',
     goalLabel: 'लक्ष्य या सवाल',
     runStepBtn: 'स्टेप चलाएं',
+    resetTaskBtn: 'नया टास्क (Reset)',
     visualGuideBtn: 'विज़ुअल गाइड Q&A',
     reviewApprovalBtn: 'समीक्षा और स्वीकृति दें',
     clarificationTitle: 'स्पष्टीकरण आवश्यक',
@@ -127,6 +129,7 @@ const state = {
   lastRawFileBase64: '',
   lastMimeType: '',
   pendingApproval: null,
+  filledFieldsSummary: {},
 };
 
 function el(id) {
@@ -216,19 +219,105 @@ async function getActiveTabInfo() {
   return tab;
 }
 
+async function savePersistedTaskId(taskId) {
+  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+    if (taskId) {
+      await chrome.storage.local
+        .set({
+          ua_active_task_id: String(taskId),
+          ua_filled_fields_summary: state.filledFieldsSummary || {},
+        })
+        .catch(() => {});
+    } else {
+      await chrome.storage.local
+        .remove(['ua_active_task_id', 'ua_filled_fields_summary'])
+        .catch(() => {});
+    }
+  }
+}
+
+async function loadPersistedTaskId() {
+  if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+    try {
+      const res = await chrome.storage.local.get(['ua_active_task_id', 'ua_filled_fields_summary']);
+      if (res && res.ua_filled_fields_summary && typeof res.ua_filled_fields_summary === 'object') {
+        state.filledFieldsSummary = res.ua_filled_fields_summary;
+      }
+      if (res && typeof res.ua_active_task_id === 'string' && res.ua_active_task_id.trim()) {
+        state.taskId = res.ua_active_task_id.trim();
+        el('taskStateBadge').textContent = `Resumed (${state.taskId.slice(0, 8)}...)`;
+      }
+    } catch (_err) {
+      // Ignore storage error
+    }
+  }
+}
+
+async function resetTaskState() {
+  state.taskId = null;
+  state.approvedActionHash = null;
+  state.pendingApproval = null;
+  state.filledFieldsSummary = {};
+  state.currentStepIndex = 0;
+  state.taskStatus = 'Idle';
+  state.nextTool = null;
+  await savePersistedTaskId(null);
+
+  el('taskStateBadge').textContent = 'Idle';
+  el('activeToolBadge').classList.add('hidden');
+  el('executionPlanBox').classList.add('hidden');
+  el('executionPlanList').replaceChildren();
+  el('clarificationBox').classList.add('hidden');
+  el('clarificationOptions').replaceChildren();
+  el('visualGuideCard').classList.add('hidden');
+  hideActionBoundReview();
+
+  const existingFillPrompt = el('inlineAuthorizeFillPrompt');
+  if (existingFillPrompt) existingFillPrompt.remove();
+
+  const feed = el('chatFeed');
+  feed.replaceChildren();
+  const emptyHint = document.createElement('div');
+  emptyHint.className = 'muted';
+  emptyHint.textContent = I18N[state.lang].chatEmpty;
+  feed.appendChild(emptyHint);
+}
+
 function captureActiveTabDom() {
   return new Promise((resolve) => {
     if (!state.activeTabId) {
       resolve(null);
       return;
     }
-    chrome.tabs.sendMessage(state.activeTabId, { type: 'CAPTURE_DOM_SNAPSHOT' }, (resp) => {
-      if (chrome.runtime.lastError || !resp || (!resp.ok && !resp.success)) {
+    const trySend = () =>
+      chrome.tabs.sendMessage(state.activeTabId, { type: 'CAPTURE_DOM_SNAPSHOT' }, async (resp) => {
+        if (!chrome.runtime.lastError && resp && (resp.ok || resp.success)) {
+          resolve(resp.snapshot || null);
+          return;
+        }
+        // Fallback: dynamically inject content scripts once on already-open tabs and retry.
+        if (chrome.scripting && typeof chrome.scripting.executeScript === 'function') {
+          try {
+            await chrome.scripting.executeScript({
+              target: { tabId: state.activeTabId },
+              files: ['src/content/dom_inspector.js', 'src/content/action_executor.js'],
+            });
+            chrome.tabs.sendMessage(state.activeTabId, { type: 'CAPTURE_DOM_SNAPSHOT' }, (retryResp) => {
+              if (chrome.runtime.lastError || !retryResp || (!retryResp.ok && !retryResp.success)) {
+                resolve(null);
+                return;
+              }
+              resolve(retryResp.snapshot || null);
+            });
+            return;
+          } catch (_injectErr) {
+            resolve(null);
+            return;
+          }
+        }
         resolve(null);
-        return;
-      }
-      resolve(resp.snapshot || null);
-    });
+      });
+    trySend();
   });
 }
 
@@ -538,8 +627,175 @@ function renderReceipt(receiptData, status) {
   }
 }
 
-function renderMappedPreviewRows(container, actions, summary) {
+function maskPreviewForDisplay(token, rawValue, isSensitive) {
+  const val = String(rawValue ?? '');
+  if (!val) return '';
+  const ref = String(token || '').toLowerCase();
+  if (ref.includes('aadhaar')) {
+    return '[Aadhaar Redacted]';
+  }
+  if (ref.includes('.pan.') || ref.endsWith('pan_number')) {
+    return val.length >= 6 ? `${val.slice(0, 5)}****${val.slice(-1)}` : '****';
+  }
+  if (ref.includes('account_number') || isSensitive) {
+    return val.length <= 4 ? '****' : `${'*'.repeat(Math.max(4, val.length - 4))}${val.slice(-4)}`;
+  }
+  return val;
+}
+
+function extractReadableFieldLabel(act) {
+  if (!act) return 'Field';
+  if (act.field_label) return String(act.field_label);
+  if (act.label) return String(act.label);
+  const desc = String(act.description || '').trim();
+  const stripped = desc.replace(/^(?:Fill(?:ing)?|Enter|Map(?:ped)?)\s+/i, '').trim();
+  return stripped || act.selector || act.element_key || 'Field';
+}
+
+async function recordActionsIntoFilledSummary(actions) {
+  const fillActions = (Array.isArray(actions) ? actions : []).filter(
+    (a) => a && a.action_type === 'FILL_FIELD'
+  );
+  if (fillActions.length === 0) return [];
+
+  const vaultTokens = Array.from(
+    new Set(
+      fillActions
+        .map((a) => a.value_or_vault_ref)
+        .filter((v) => typeof v === 'string' && v.startsWith('vault:'))
+    )
+  );
+
+  let previewsByToken = {};
+  if (vaultTokens.length > 0) {
+    try {
+      const previewRes = await sendBg('PREVIEW_VAULT_FIELDS', { tokens: vaultTokens });
+      previewsByToken = (previewRes && previewRes.previews) || {};
+    } catch (_err) {
+      previewsByToken = {};
+    }
+  }
+
+  const batchEntries = [];
+  fillActions.forEach((act) => {
+    const label = extractReadableFieldLabel(act);
+    const selector = String(act.selector || act.element_key || '');
+    const token = String(act.value_or_vault_ref || '');
+    let previewValue = '';
+    if (token.startsWith('vault:')) {
+      previewValue = previewsByToken[token] || token;
+    } else {
+      previewValue = act.is_sensitive
+        ? maskPreviewForDisplay('', token, true)
+        : token;
+    }
+
+    const entry = { label, selector, token, previewValue };
+    const summaryKey = `${selector || label}::${token || label}`;
+    state.filledFieldsSummary[summaryKey] = entry;
+    batchEntries.push(entry);
+  });
+
+  if (state.taskId) {
+    await savePersistedTaskId(state.taskId);
+  }
+  return batchEntries;
+}
+
+function renderFilledDetailsTable(container, entries) {
+  const rows = Array.isArray(entries) ? entries : Object.values(entries || {});
+  if (rows.length === 0) return;
+
+  const heading = document.createElement('div');
+  heading.className = 'field-label';
+  heading.style.marginTop = '6px';
+  heading.textContent =
+    state.lang === 'hi'
+      ? 'भरे जाने वाले विवरण की समीक्षा (Review Filled Details)'
+      : 'Review Filled Details';
+  container.appendChild(heading);
+
+  const table = document.createElement('table');
+  table.className = 'review-table';
+
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  [
+    state.lang === 'hi' ? 'फ़ील्ड' : 'Field Label',
+    state.lang === 'hi' ? 'मान (Preview)' : 'Value Preview',
+    state.lang === 'hi' ? 'स्रोत / सेलेक्टर' : 'Selector / Token',
+  ].forEach((colTitle) => {
+    const th = document.createElement('th');
+    th.textContent = colTitle;
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  rows.forEach((entry) => {
+    const tr = document.createElement('tr');
+
+    const tdLabel = document.createElement('td');
+    tdLabel.textContent = String(entry.label || '');
+
+    const tdVal = document.createElement('td');
+    tdVal.textContent = String(entry.previewValue || entry.token || '');
+
+    const tdSrc = document.createElement('td');
+    tdSrc.textContent = [entry.selector, entry.token].filter(Boolean).join(' • ');
+
+    tr.appendChild(tdLabel);
+    tr.appendChild(tdVal);
+    tr.appendChild(tdSrc);
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  container.appendChild(table);
+}
+
+function flattenSummaryEntries(input, prefix = '', out = []) {
+  if (input === null || input === undefined) {
+    return out;
+  }
+  if (Array.isArray(input)) {
+    input.forEach((val, idx) => {
+      const nextKey = prefix ? `${prefix}[${idx}]` : `[${idx}]`;
+      if (val && typeof val === 'object') {
+        flattenSummaryEntries(val, nextKey, out);
+      } else {
+        out.push([nextKey, val === undefined ? '' : String(val)]);
+      }
+    });
+    return out;
+  }
+  if (typeof input === 'object') {
+    Object.entries(input).forEach(([k, v]) => {
+      const nextKey = prefix ? `${prefix}.${k}` : k;
+      if (v && typeof v === 'object') {
+        flattenSummaryEntries(v, nextKey, out);
+      } else {
+        out.push([nextKey, v === null || v === undefined ? '' : String(v)]);
+      }
+    });
+    return out;
+  }
+  if (prefix) {
+    out.push([prefix, String(input)]);
+  }
+  return out;
+}
+
+function renderMappedPreviewRows(container, actions, summary, extraFilledEntries = null) {
   container.replaceChildren();
+
+  const filledEntries = Array.isArray(extraFilledEntries)
+    ? extraFilledEntries
+    : Object.values(state.filledFieldsSummary || {});
+  if (filledEntries.length > 0) {
+    renderFilledDetailsTable(container, filledEntries);
+  }
+
   if (Array.isArray(actions) && actions.length > 0) {
     actions.forEach((act) => {
       const item = document.createElement('div');
@@ -557,11 +813,24 @@ function renderMappedPreviewRows(container, actions, summary) {
       item.appendChild(meta);
       container.appendChild(item);
     });
-  } else if (summary && typeof summary === 'object') {
-    Object.entries(summary).forEach(([k, v]) => {
+  }
+
+  if (summary && typeof summary === 'object') {
+    const flatPairs = flattenSummaryEntries(summary);
+    flatPairs.forEach(([k, valStr]) => {
       const item = document.createElement('div');
       item.className = 'field-item';
-      item.textContent = `${k}: ${String(v)}`;
+      const meta = document.createElement('div');
+      meta.className = 'field-meta';
+      const keyDiv = document.createElement('div');
+      keyDiv.className = 'field-key';
+      keyDiv.textContent = k;
+      const valDiv = document.createElement('div');
+      valDiv.className = 'field-val';
+      valDiv.textContent = valStr;
+      meta.appendChild(keyDiv);
+      meta.appendChild(valDiv);
+      item.appendChild(meta);
       container.appendChild(item);
     });
   }
@@ -648,6 +917,7 @@ async function submitApprovalDecision(approved) {
 async function handleAgentResponse(step) {
   if (step.task_id) {
     state.taskId = step.task_id;
+    await savePersistedTaskId(step.task_id);
   }
   state.currentStepIndex = step.current_step_index || state.currentStepIndex || 1;
   state.totalSteps = step.total_steps || state.totalSteps || 4;
@@ -698,34 +968,69 @@ async function handleAgentResponse(step) {
     existingFillPrompt.remove();
   }
 
-  // Execute approved or non-vault actions on active tab; prompt inline for intermediate vault: FILL_FIELD actions
+  // Execute non-vault non-fill actions immediately; show Editable Field Review Table for FILL_FIELD actions;
+  // never click #btn-final-submit or any submit button until APPROVE_TASK + pending_action_hash approval.
   if (step.response_type === 'action' && Array.isArray(actions) && actions.length > 0 && state.activeTabId) {
-    const hasVaultToken = actions.some(
-      (a) => a && typeof a.value_or_vault_ref === 'string' && a.value_or_vault_ref.startsWith('vault:')
+    const fillActions = actions.filter((a) => a && a.action_type === 'FILL_FIELD');
+    const clickButtons = actions.filter((a) => a && a.action_type === 'CLICK_BUTTON');
+    const hasSubmitClick = clickButtons.some(
+      (a) =>
+        (a.selector && a.selector.includes('submit')) ||
+        /submit/i.test(a.description || '') ||
+        a.field_type === 'submit'
     );
-    const hasButtonClick = actions.some((a) => a && a.action_type === 'CLICK_BUTTON');
 
-    if (hasVaultToken && !hasButtonClick && !state.approvedActionHash) {
-      renderAuthorizeFieldFillPrompt(actions);
+    if (hasSubmitClick && !state.approvedActionHash) {
+      let pendingHash = step.pending_action_hash || null;
+      if (!pendingHash && state.taskId) {
+        try {
+          const taskRec = await sendBg('GET_TASK', {
+            apiBaseUrl: getApiBaseUrl(),
+            task_id: state.taskId,
+          });
+          pendingHash = taskRec.pending_action_hash || null;
+        } catch (_err) {
+          pendingHash = null;
+        }
+      }
+      showActionBoundReview({
+        taskId: state.taskId,
+        targetDomain: state.activeDomain,
+        actionHash: pendingHash || 'PENDING_APPROVAL_REQUIRED',
+        actions,
+        summary: { note: 'Submit requires explicit Approve & Submit via pending_action_hash (FR-027)' },
+      });
       return;
     }
 
-    if (!hasVaultToken || state.approvedActionHash) {
+    if (fillActions.length > 0) {
+      await recordActionsIntoFilledSummary(fillActions);
+      let previewItems = [];
+      try {
+        const previewRes = await sendBg('PREVIEW_VAULT_ACTIONS', {
+          actions: fillActions,
+          task_id: state.taskId,
+        });
+        previewItems = (previewRes && previewRes.items) || [];
+      } catch (_err) {
+        previewItems = [];
+      }
+      renderEditableFillReviewTable(fillActions, previewItems);
+      return;
+    }
+
+    const nonFillActions = actions.filter((a) => a && a.action_type !== 'FILL_FIELD');
+    if (nonFillActions.length > 0) {
       try {
         const execOutcome = await dispatchActionsToActiveTab(
-          actions,
+          nonFillActions,
           state.taskId,
           state.approvedActionHash
         );
         const okCount = (execOutcome.results || []).filter((r) => r.success).length;
-        const verifiedMsg =
-          typeof execOutcome.verified_count === 'number'
-            ? ` (verified ${execOutcome.verified_count}, mismatches ${(execOutcome.mismatches || []).length})`
-            : '';
-        showAlert(`Executed ${okCount} action(s) on active tab${verifiedMsg}.`, 'ok');
+        showAlert(`Executed ${okCount} approved action(s) on active tab.`, 'ok');
 
-        // If CLICK_BUTTON submitted the form, scan & verify receipt automatically.
-        if (hasButtonClick) {
+        if (hasSubmitClick) {
           await new Promise((r) => setTimeout(r, 250));
           await verifySubmissionReceipt();
         }
@@ -736,9 +1041,12 @@ async function handleAgentResponse(step) {
   }
 }
 
-function renderAuthorizeFieldFillPrompt(actions) {
+function renderEditableFillReviewTable(fillActions, previewItems) {
   const planBox = el('executionPlanBox') || el('chatFeed');
   if (!planBox) return;
+
+  const prevCard = el('inlineAuthorizeFillPrompt');
+  if (prevCard) prevCard.remove();
 
   const promptCard = document.createElement('div');
   promptCard.id = 'inlineAuthorizeFillPrompt';
@@ -751,44 +1059,182 @@ function renderAuthorizeFieldFillPrompt(actions) {
   title.className = 'field-key';
   title.textContent =
     state.lang === 'hi'
-      ? 'वॉल्ट फ़ील्ड भरने की अनुमति दें (Pre-Submit Fill)'
-      : 'Authorize Local Vault Field Fill (Pre-Submit)';
+      ? 'फ़ील्ड-मान संपादित करें और पृष्ठ पर भरें (Editable Pre-Fill Review)'
+      : 'Editable Field Review Table (Pre-Fill Verification)';
   promptCard.appendChild(title);
 
-  const previewList = document.createElement('div');
-  previewList.style.margin = '6px 0';
-  renderMappedPreviewRows(previewList, actions, null);
-  promptCard.appendChild(previewList);
+  const table = document.createElement('table');
+  table.className = 'review-table';
+  const thead = document.createElement('thead');
+  const headRow = document.createElement('tr');
+  [
+    state.lang === 'hi' ? 'भरें' : 'Include',
+    state.lang === 'hi' ? 'फ़ील्ड' : 'Field Label',
+    state.lang === 'hi' ? 'मान (संपादन योग्य)' : 'Resolved Value (Editable)',
+  ].forEach((hdr) => {
+    const th = document.createElement('th');
+    th.textContent = hdr;
+    headRow.appendChild(th);
+  });
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  const rowBindings = [];
+
+  fillActions.forEach((act, idx) => {
+    const matched =
+      (Array.isArray(previewItems) &&
+        previewItems.find(
+          (item) =>
+            item &&
+            ((act.element_key && item.element_key === act.element_key) ||
+              (act.selector && item.selector === act.selector) ||
+              item.action_id === (act.element_key || act.selector || String(idx)))
+        )) ||
+      null;
+
+    const label = (matched && matched.label) || extractReadableFieldLabel(act);
+    const resolvedVal =
+      matched && typeof matched.value === 'string'
+        ? matched.value
+        : act.value_or_vault_ref && !String(act.value_or_vault_ref).startsWith('vault:')
+          ? String(act.value_or_vault_ref)
+          : '';
+    const isSensitive = Boolean((matched && matched.isSensitive) || act.is_sensitive);
+    const errMsg = matched && matched.error ? String(matched.error) : '';
+
+    const tr = document.createElement('tr');
+
+    const tdCheck = document.createElement('td');
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = resolvedVal.length > 0 && !errMsg;
+    tdCheck.appendChild(cb);
+
+    const tdLabel = document.createElement('td');
+    const lblText = document.createElement('div');
+    lblText.textContent = label;
+    tdLabel.appendChild(lblText);
+    if (errMsg) {
+      const errDiv = document.createElement('div');
+      errDiv.className = 'muted';
+      errDiv.textContent = errMsg;
+      tdLabel.appendChild(errDiv);
+    }
+
+    const tdVal = document.createElement('td');
+    const cellWrap = document.createElement('div');
+    cellWrap.className = 'edit-review-cell';
+
+    const input = document.createElement('input');
+    // Pre-populate resolved value cleanly; toggle type="password" <-> "text" for sensitive IDs (PAN/Aadhaar).
+    input.type = isSensitive ? 'password' : 'text';
+    input.className = 'edit-review-input';
+    input.value = resolvedVal;
+    input.dataset.originalValue = resolvedVal;
+    input.placeholder = errMsg ? 'Enter manually or unlock vault' : 'Enter value';
+    cellWrap.appendChild(input);
+
+    if (isSensitive) {
+      const toggleBtn = document.createElement('button');
+      toggleBtn.type = 'button';
+      toggleBtn.className = 'btn secondary toggle-vis-btn';
+      toggleBtn.textContent = state.lang === 'hi' ? 'दिखाएं' : 'Show';
+      toggleBtn.addEventListener('click', () => {
+        const showPlain = input.type === 'password';
+        input.type = showPlain ? 'text' : 'password';
+        toggleBtn.textContent = showPlain
+          ? state.lang === 'hi'
+            ? 'छिपाएं'
+            : 'Hide'
+          : state.lang === 'hi'
+            ? 'दिखाएं'
+            : 'Show';
+      });
+      cellWrap.appendChild(toggleBtn);
+    }
+
+    tdVal.appendChild(cellWrap);
+    tr.appendChild(tdCheck);
+    tr.appendChild(tdLabel);
+    tr.appendChild(tdVal);
+    tbody.appendChild(tr);
+
+    rowBindings.push({ act, cb, input, label, isSensitive });
+  });
+
+  table.appendChild(tbody);
+  promptCard.appendChild(table);
 
   const row = document.createElement('div');
   row.className = 'row';
-  const authBtn = document.createElement('button');
-  authBtn.type = 'button';
-  authBtn.id = 'authorizeFieldFillBtn';
-  authBtn.className = 'btn';
-  authBtn.textContent =
-    state.lang === 'hi' ? 'फ़ील्ड भरने की अनुमति दें' : 'Authorize Field Fill';
-  authBtn.addEventListener('click', async () => {
+  row.style.marginTop = '8px';
+
+  const applyBtn = document.createElement('button');
+  applyBtn.type = 'button';
+  applyBtn.id = 'applyEditsAndFillBtn';
+  applyBtn.className = 'btn';
+  applyBtn.textContent =
+    state.lang === 'hi' ? 'संपादन लागू करें और पृष्ठ भरें' : 'Apply Edits & Fill Page';
+
+  applyBtn.addEventListener('click', async () => {
     clearAlert();
-    authBtn.disabled = true;
+    applyBtn.disabled = true;
     try {
       await getActiveTabInfo();
-      const fillActions = actions.filter((a) => a && a.action_type === 'FILL_FIELD');
+      const selectedBindings = rowBindings.filter((b) => b.cb.checked && b.input.value.trim().length > 0);
+      if (selectedBindings.length === 0) {
+        throw new Error('Select at least one field with a value before applying fill.');
+      }
+
+      const actionsToDispatch = selectedBindings.map((b) => {
+        const editedVal = b.input.value;
+        const unmodifiedVault =
+          typeof b.act.value_or_vault_ref === 'string' &&
+          b.act.value_or_vault_ref.startsWith('vault:') &&
+          editedVal === b.input.dataset.originalValue;
+
+        const selector = String(b.act.selector || b.act.element_key || '');
+        const token = String(b.act.value_or_vault_ref || '');
+        const summaryKey = `${selector || b.label}::${token || b.label}`;
+        state.filledFieldsSummary[summaryKey] = {
+          label: b.label,
+          selector,
+          token,
+          previewValue: maskPreviewForDisplay(token, editedVal, b.isSensitive),
+        };
+
+        return {
+          ...b.act,
+          action_type: 'FILL_FIELD',
+          value_or_vault_ref: unmodifiedVault ? b.act.value_or_vault_ref : editedVal,
+        };
+      });
+
+      if (state.taskId) {
+        await savePersistedTaskId(state.taskId);
+      }
+
       const authRes = await sendBg('AUTHORIZE_FIELD_FILL', {
         tabId: state.activeTabId,
         task_id: state.taskId,
-        actions: fillActions,
+        actions: actionsToDispatch,
         dispatch: false,
       });
       if (!authRes || !authRes.authorized) {
-        throw new Error('Failed to authorize intermediate field fill.');
+        throw new Error('Failed to authorize field fill in service worker.');
       }
-      const execOutcome = await dispatchActionsToActiveTab(fillActions, state.taskId, null);
+
+      const execOutcome = await dispatchActionsToActiveTab(actionsToDispatch, state.taskId, null);
       const okCount = (execOutcome.results || []).filter((r) => r.success).length;
       promptCard.remove();
-      showAlert(`Authorized and filled ${okCount} verified field(s) on active tab.`, 'ok');
+      showAlert(
+        `Applied edits and filled ${okCount} field(s). Manually review before clicking Next or Submit.`,
+        'ok'
+      );
     } catch (err) {
-      authBtn.disabled = false;
+      applyBtn.disabled = false;
       showAlert(err.message, 'err');
     }
   });
@@ -799,7 +1245,7 @@ function renderAuthorizeFieldFillPrompt(actions) {
   dismissBtn.textContent = state.lang === 'hi' ? 'रद्द करें' : 'Dismiss';
   dismissBtn.addEventListener('click', () => promptCard.remove());
 
-  row.appendChild(authBtn);
+  row.appendChild(applyBtn);
   row.appendChild(dismissBtn);
   promptCard.appendChild(row);
   planBox.appendChild(promptCard);
@@ -1092,6 +1538,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     runAgentTurn().catch((err) => showAlert(err.message, 'err'));
   });
 
+  el('resetTaskBtn').addEventListener('click', () => {
+    clearAlert();
+    resetTaskState()
+      .then(() => showAlert('Cleared active task_id. Ready for a new task.', 'ok'))
+      .catch((err) => showAlert(err.message, 'err'));
+  });
+
   el('inspectGuideBtn').addEventListener('click', () => {
     const query = el('goalInput').value.trim() || 'Where is my account number on the passbook?';
     runAgentTurn(query, { includeDom: false }).catch((err) => showAlert(err.message, 'err'));
@@ -1222,5 +1675,5 @@ document.addEventListener('DOMContentLoaded', async () => {
     submitApprovalDecision(false).catch((err) => showAlert(err.message, 'err'));
   });
 
-  await Promise.all([refreshDomainShield(), refreshVaultList()]);
+  await Promise.all([loadPersistedTaskId(), refreshDomainShield(), refreshVaultList()]);
 });
