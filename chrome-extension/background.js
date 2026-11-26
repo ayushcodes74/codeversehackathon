@@ -381,11 +381,30 @@ async function handleAgentChatStep(msg) {
     dom_snapshot: msg.dom_snapshot || null,
   };
 
-  const step = await apiFetch('/api/v1/agent/chat', {
-    method: 'POST',
-    jsonBody: body,
-    baseUrl: msg.apiBaseUrl,
-  });
+  let step;
+  try {
+    step = await apiFetch('/api/v1/agent/chat', {
+      method: 'POST',
+      jsonBody: body,
+      baseUrl: msg.apiBaseUrl,
+    });
+  } catch (err) {
+    const errText = (err && err.message) || String(err);
+    if (errText.includes('caller identity does not match task owner') && body.task_id) {
+      console.warn('[Background] Caller identity mismatch for task', body.task_id, '- retrying fresh turn without task_id');
+      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+        await chrome.storage.local.remove(['ua_active_task_id', 'ua_filled_fields_summary']).catch(() => {});
+      }
+      body.task_id = null;
+      step = await apiFetch('/api/v1/agent/chat', {
+        method: 'POST',
+        jsonBody: body,
+        baseUrl: msg.apiBaseUrl,
+      });
+    } else {
+      throw err;
+    }
+  }
 
   let pendingActionHash =
     step &&

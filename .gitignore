@@ -19,3 +19,7 @@ local.properties
 *.iml
 .cxx/
 
+venv/
+
+.env
+backend/.env

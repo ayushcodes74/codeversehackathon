@@ -10,6 +10,13 @@
 (function () {
   'use strict';
 
+  if (typeof window !== 'undefined') {
+    if (window.__UA_DOM_INSPECTOR_LOADED__) {
+      return;
+    }
+    window.__UA_DOM_INSPECTOR_LOADED__ = true;
+  }
+
   const MAX_SNIPPET_CHARS = 1500;
   const FORM_CONTROL_SELECTOR = [
     'input',

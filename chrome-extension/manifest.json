@@ -5,17 +5,13 @@
   "description": "Zero-Leak Hybrid AI Web Assistant & Browser Automation Layer",
   "permissions": [
     "activeTab",
+    "tabs",
     "scripting",
     "storage",
     "sidePanel"
   ],
   "host_permissions": [
-    "https://scholarships.gov.in/*",
-    "https://www.incometax.gov.in/*",
-    "https://parivahan.gov.in/*",
-    "https://uidai.gov.in/*",
-    "http://localhost/*",
-    "http://127.0.0.1/*"
+    "<all_urls>"
   ],
   "background": {
     "service_worker": "background.js"
@@ -29,12 +25,8 @@
   "content_scripts": [
     {
       "matches": [
-        "https://scholarships.gov.in/*",
-        "https://www.incometax.gov.in/*",
-        "https://parivahan.gov.in/*",
-        "https://uidai.gov.in/*",
-        "http://localhost/*",
-        "http://127.0.0.1/*"
+        "http://*/*",
+        "https://*/*"
       ],
       "js": [
         "src/content/dom_inspector.js",

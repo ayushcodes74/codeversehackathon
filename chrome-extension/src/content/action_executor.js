@@ -16,6 +16,13 @@
 (function () {
   'use strict';
 
+  if (typeof window !== 'undefined') {
+    if (window.__UA_ACTION_EXECUTOR_LOADED__) {
+      return;
+    }
+    window.__UA_ACTION_EXECUTOR_LOADED__ = true;
+  }
+
   function hasExtensionBridge() {
     return (
       typeof chrome !== 'undefined' &&
