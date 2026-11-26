@@ -127,7 +127,36 @@ async def resolve_portal_context(
     db: AsyncSession, raw_url: str
 ) -> SessionPortalContext:
     """Evaluate a browser URL against Domain Shield and ApprovedPortal without storing query strings."""
+    from app.core.config import get_settings
+
+    raw_stripped = (raw_url or "").strip()
+    local_dev_allowed = get_settings().local_dev_portals_allowed
+    if raw_stripped.lower().startswith("file://"):
+        if local_dev_allowed:
+            return SessionPortalContext(
+                domain="local-file",
+                is_official=True,
+                support_tier=PortalSupportTier.KNOWN_PORTAL,
+                portal_name="Local File Test Portal",
+                reason="Local file:// test portal allowed in local development mode.",
+            )
+        return SessionPortalContext(
+            domain="local-file",
+            is_official=False,
+            support_tier=PortalSupportTier.BLOCKED,
+            reason="Local file:// pages cannot be verified by Domain Shield. Serve the test portal over http://127.0.0.1 (e.g., python -m http.server 5500) and retry.",
+        )
+
     canonical_domain = _extract_canonical_hostname(raw_url)
+    if canonical_domain in ("localhost", "127.0.0.1", "::1", "testserver") and local_dev_allowed:
+        return SessionPortalContext(
+            domain=canonical_domain,
+            is_official=True,
+            support_tier=PortalSupportTier.KNOWN_PORTAL,
+            portal_name="Synthetic Demo Portal",
+            reason=f"Local development host '{canonical_domain}' allowed in non-production environment.",
+        )
+
     if not canonical_domain or "." not in canonical_domain:
         return SessionPortalContext(
             domain=canonical_domain or "invalid",

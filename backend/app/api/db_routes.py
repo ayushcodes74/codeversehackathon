@@ -580,7 +580,33 @@ async def verify_domain(
     if not raw_target or not raw_target.strip():
         raise HTTPException(status_code=422, detail="Query parameter 'domain' or 'url' is required.")
 
-    canonical_domain = _extract_canonical_hostname(raw_target)
+    raw_stripped = raw_target.strip()
+    local_dev_allowed = get_settings().local_dev_portals_allowed
+    if "://" in raw_stripped:
+        parsed_scheme = urlparse(raw_stripped).scheme.lower()
+        if parsed_scheme == "file":
+            if local_dev_allowed:
+                return {
+                    "is_official": True,
+                    "canonical_domain": "local-file",
+                    "support_tier": "local_demo",
+                    "reason": "Local file:// test portal allowed in local development mode.",
+                }
+            return {
+                "is_official": False,
+                "canonical_domain": "local-file",
+                "support_tier": "blocked",
+                "reason": "Local file:// pages cannot be verified by Domain Shield. Serve the test portal over http://127.0.0.1 (e.g., python -m http.server 5500) and retry.",
+            }
+        if parsed_scheme not in ("http", "https"):
+            return {
+                "is_official": False,
+                "canonical_domain": "",
+                "support_tier": "blocked",
+                "reason": f"URL scheme '{parsed_scheme}://' is blocked by Official Domain Shield.",
+            }
+
+    canonical_domain = _extract_canonical_hostname(raw_stripped)
     if not canonical_domain:
         return {
             "is_official": False,
@@ -589,7 +615,7 @@ async def verify_domain(
             "reason": "Invalid or unparseable domain/URL.",
         }
 
-    if canonical_domain in ("localhost", "127.0.0.1") and not get_settings().is_production:
+    if canonical_domain in ("localhost", "127.0.0.1", "::1", "testserver") and local_dev_allowed:
         return {
             "is_official": True,
             "canonical_domain": canonical_domain,

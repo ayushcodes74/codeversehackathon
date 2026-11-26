@@ -17,7 +17,7 @@
     "service_worker": "background.js"
   },
   "side_panel": {
-    "default_path": "sidepanel.html"
+    "default_path": "frontend/sidepanel.html"
   },
   "action": {
     "default_title": "Open Universal AI Web Assistant"
@@ -26,7 +26,8 @@
     {
       "matches": [
         "http://*/*",
-        "https://*/*"
+        "https://*/*",
+        "file:///*"
       ],
       "js": [
         "src/content/dom_inspector.js",

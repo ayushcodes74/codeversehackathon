@@ -288,7 +288,7 @@ const CONTENT_SCRIPT_FILES = ['src/content/dom_inspector.js', 'src/content/actio
 function isWebUrl(url) {
   if (!url || typeof url !== 'string') return false;
   const lower = url.trim().toLowerCase();
-  return lower.startsWith('http://') || lower.startsWith('https://');
+  return lower.startsWith('http://') || lower.startsWith('https://') || lower.startsWith('file://');
 }
 
 /**
@@ -395,8 +395,11 @@ async function sendTabMessageWithRetry(tabId, message, options = {}) {
       } catch (injectErr) {
         console.warn('[SidePanel] Script auto-injection failed:', injectErr);
         if (!options.silent) {
+          const isFileUrl = currentUrl.toLowerCase().startsWith('file://');
           showAlert(
-            state.lang === 'hi'
+            isFileUrl
+              ? 'Could not access file:// tab. Enable "Allow access to file URLs" in chrome://extensions, or serve via http://127.0.0.1:5500.'
+              : state.lang === 'hi'
               ? 'टैब से कनेक्शन स्थापित नहीं हो सका। कृपया पृष्ठ को रीफ़्रेश करें।'
               : 'Could not connect to active portal tab. Please refresh the page.',
             'warn'
@@ -501,7 +504,7 @@ async function refreshDomainShield() {
   const reasonNode = el('domainReasonText');
   await getActiveTabInfo();
 
-  if (!state.activeUrl || (!state.activeUrl.startsWith('http://') && !state.activeUrl.startsWith('https://'))) {
+  if (!isWebUrl(state.activeUrl)) {
     badge.textContent = 'No Portal Tab';
     badge.className = 'badge warn';
     reasonNode.textContent = '';

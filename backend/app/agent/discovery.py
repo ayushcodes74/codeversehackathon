@@ -14,6 +14,7 @@ import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
+from app.core.config import get_settings
 from app.models import ApprovedPortal, AgentMemory
 from app.schemas.agent_contracts import (
     VerifyDomainOutput,
@@ -61,6 +62,28 @@ async def check_domain_shield(
 
     parsed = urlparse(raw if "://" in raw else f"http://{raw}")
     scheme = parsed.scheme.lower()
+    local_dev_allowed = get_settings().local_dev_portals_allowed
+
+    if scheme == "file":
+        if local_dev_allowed:
+            return VerifyDomainOutput(
+                is_allowed=True,
+                domain="local-file",
+                portal_name="Local File Test Portal",
+                category="Development & Testing",
+                shield_status="LOCAL_DEV_ALLOWED",
+                warning=None,
+                allowed_paths=[],
+                support_tier="local_dev",
+                redirect_chain=[raw],
+            )
+        return VerifyDomainOutput(
+            is_allowed=False,
+            domain="",
+            shield_status="BLOCKED_UNOFFICIAL",
+            warning="Local file:// pages cannot be verified by Domain Shield. Serve the test portal over http://127.0.0.1 (e.g., python -m http.server 5500) and retry.",
+        )
+
     if scheme not in ("http", "https"):
         return VerifyDomainOutput(
             is_allowed=False,
@@ -89,8 +112,8 @@ async def check_domain_shield(
             warning=f"Punycode or non-ASCII homograph domain '{host}' is blocked by Official Domain Shield.",
         )
 
-    # 1. Allow local dev synthetic demo portal over HTTP/HTTPS only
-    if host in LOCAL_DEV_HOSTS:
+    # 1. Allow local dev synthetic demo portal over HTTP/HTTPS when enabled
+    if host in LOCAL_DEV_HOSTS and local_dev_allowed:
         return VerifyDomainOutput(
             is_allowed=True,
             domain=host,
