@@ -1,0 +1,15 @@
+{
+  "name": "universal-ai-assistant-chrome-extension",
+  "version": "3.0.0",
+  "private": true,
+  "description": "Zero-Leak Hybrid AI Web Assistant Chrome Extension (MV3) with Encrypted Local Vault",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && node --check background.js && node --check src/content/action_executor.js && node --check src/content/dom_inspector.js",
+    "build": "tsc --noEmit && esbuild src/vault/cryptoVault.ts --bundle --format=iife --global-name=CryptoVault --platform=browser --target=chrome114 --outfile=dist/vault/cryptoVault.js --footer:js=\"if(typeof globalThis!=='undefined'){globalThis.CryptoVault=CryptoVault;}if(typeof module!=='undefined'&&module.exports){module.exports=CryptoVault;}\""
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  }
+}

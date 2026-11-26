@@ -1,5 +1,6 @@
 """Ownership-enforced Safe-Pause clarification service routing through AgentGateway."""
 
+import inspect
 import logging
 import uuid
 

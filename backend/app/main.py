@@ -14,11 +14,12 @@ from fastapi import Depends, FastAPI
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.agent_routes import router as agent_router
 from app.api.router import register_routers
-from app.core.config import AppSettings, get_settings
+from app.core.config import get_settings
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import configure_logging
-from app.core.middleware import register_middlewares
+from app.core.middleware import RequestContextMiddleware
 from app.database import get_db
 from app.policies.log_redactor import redact_sensitive_text
 
@@ -78,12 +79,11 @@ app = create_app()
 if __name__ == "__main__":
     import uvicorn
 
-    runtime_settings = get_settings()
     uvicorn.run(
         "app.main:app",
         app_dir=str(BACKEND_DIR),
-        host=runtime_settings.host,
-        port=runtime_settings.port,
-        reload=runtime_settings.is_development,
-        log_level=runtime_settings.log_level.lower(),
+        host=_settings.host,
+        port=_settings.port,
+        reload=_settings.is_development,
+        log_level=_settings.log_level.lower(),
     )

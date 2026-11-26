@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Universal AI Web Assistant</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --surface: #ffffff;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --muted: #475569;
+      --primary: #1d4ed8;
+      --primary-hover: #1e40af;
+      --ok-bg: #ecfdf5;
+      --ok-fg: #047857;
+      --warn-bg: #fffbeb;
+      --warn-fg: #b45309;
+      --err-bg: #fef2f2;
+      --err-fg: #b91c1c;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 12px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .title { font-size: 15px; font-weight: 700; margin: 0; }
+    .lang-toggle {
+      display: inline-flex;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+      background: var(--surface);
+    }
+    .lang-toggle button {
+      border: none;
+      background: transparent;
+      padding: 4px 8px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+      color: var(--muted);
+    }
+    .lang-toggle button.active {
+      background: var(--primary);
+      color: #ffffff;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 10px;
+    }
+    .card h2 {
+      font-size: 13px;
+      margin: 0 0 8px 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .badge {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      background: #e2e8f0;
+      color: var(--text);
+    }
+    .badge.ok { background: var(--ok-bg); color: var(--ok-fg); }
+    .badge.warn { background: var(--warn-bg); color: var(--warn-fg); }
+    .badge.err { background: var(--err-bg); color: var(--err-fg); }
+    .badge.info { background: #eff6ff; color: #1d4ed8; }
+    .row { display: flex; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; align-items: center; }
+    label.field-label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 3px; font-weight: 600; }
+    input[type="text"], input[type="email"], input[type="password"], input[type="url"], select, textarea {
+      width: 100%;
+      padding: 6px 8px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: 12px;
+      background: #ffffff;
+    }
+    textarea { resize: vertical; min-height: 52px; }
+    .btn {
+      padding: 6px 10px;
+      border-radius: 6px;
+      border: 1px solid transparent;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      background: var(--primary);
+      color: #ffffff;
+    }
+    .btn:hover { background: var(--primary-hover); }
+    .btn.secondary {
+      background: #ffffff;
+      color: var(--text);
+      border-color: var(--border);
+    }
+    .btn.danger { background: #dc2626; color: #ffffff; }
+    .btn.small { padding: 4px 8px; font-size: 11px; }
+    .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+    .status-banner {
+      padding: 6px 8px;
+      border-radius: 6px;
+      font-size: 12px;
+      margin-bottom: 8px;
+      display: none;
+    }
+    .status-banner.show { display: block; }
+    .status-banner.ok { background: var(--ok-bg); color: var(--ok-fg); }
+    .status-banner.warn { background: var(--warn-bg); color: var(--warn-fg); }
+    .status-banner.err { background: var(--err-bg); color: var(--err-fg); }
+    .feed {
+      max-height: 160px;
+      overflow-y: auto;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px;
+      background: #f8fafc;
+      margin-bottom: 8px;
+      font-size: 12px;
+    }
+    .feed-msg { margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px dashed #e2e8f0; }
+    .feed-msg:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: none; }
+    .plan-box {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 6px 8px;
+      background: #f8fafc;
+      margin-bottom: 8px;
+      font-size: 11px;
+    }
+    .plan-step {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 3px 0;
+      border-bottom: 1px dashed #e2e8f0;
+    }
+    .plan-step:last-child { border-bottom: none; }
+    .field-item {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 6px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      margin-bottom: 6px;
+      background: #f8fafc;
+    }
+    .field-meta { flex: 1; min-width: 0; }
+    .field-key { font-weight: 600; font-size: 12px; display: flex; justify-content: space-between; gap: 4px; }
+    .field-val { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--muted); word-break: break-all; }
+    .callout {
+      padding: 5px 7px;
+      background: #eff6ff;
+      border-left: 3px solid var(--primary);
+      border-radius: 4px;
+      margin-top: 5px;
+      font-size: 11px;
+    }
+    .clarification-box {
+      border: 1px solid #f59e0b;
+      background: #fffbeb;
+      border-radius: 6px;
+      padding: 8px;
+      margin-top: 8px;
+    }
+    .option-chip {
+      border: 1px solid var(--border);
+      background: #ffffff;
+      color: var(--text);
+      border-radius: 999px;
+      padding: 3px 9px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .option-chip:hover { border-color: var(--primary); color: var(--primary); }
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.55);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 12px;
+      z-index: 100;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal {
+      background: #ffffff;
+      border-radius: 10px;
+      padding: 14px;
+      width: 100%;
+      max-width: 390px;
+      max-height: 90vh;
+      overflow-y: auto;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25);
+    }
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
+      background: #f1f5f9;
+      padding: 4px 6px;
+      border-radius: 4px;
+      word-break: break-all;
+    }
+    .hidden { display: none !important; }
+    .muted { color: var(--muted); font-size: 11px; }
+  </style>
+</head>
+<body>
+  <!-- View 1 Header: Bilingual Toggle & Domain Shield -->
+  <div class="header">
+    <h1 class="title" data-i18n="appTitle">Universal AI Assistant</h1>
+    <div style="display: flex; align-items: center; gap: 6px;">
+      <span id="domainShieldBadge" class="badge">Checking Domain...</span>
+      <div class="lang-toggle" role="group" aria-label="Language">
+        <button id="langEnBtn" type="button" class="active">EN</button>
+        <button id="langHiBtn" type="button">Hinglish</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="globalAlert" class="status-banner"></div>
+
+  <!-- View 1: Session, Language & Domain Shield Card -->
+  <section class="card">
+    <h2>
+      <span data-i18n="sessionVaultTitle">Session &amp; Domain Shield</span>
+      <span id="authStatusBadge" class="badge warn">Not Connected</span>
+    </h2>
+    <div class="row">
+      <div style="flex: 1 1 56%;">
+        <label class="field-label" for="apiBaseUrlInput" data-i18n="apiUrlLabel">Backend API URL</label>
+        <input id="apiBaseUrlInput" type="url" value="http://127.0.0.1:8000" />
+      </div>
+      <div style="flex: 1 1 40%;">
+        <label class="field-label" for="userIdInput" data-i18n="userIdLabel">User ID (Optional UUID)</label>
+        <input id="userIdInput" type="text" placeholder="Auto-init if blank" />
+      </div>
+    </div>
+    <div class="row">
+      <div style="flex: 1 1 48%;">
+        <label class="field-label" for="userFullNameInput" data-i18n="fullNameLabel">Full Name</label>
+        <input id="userFullNameInput" type="text" placeholder="Ayush Kumar" />
+      </div>
+      <div style="flex: 1 1 48%;">
+        <label class="field-label" for="userEmailInput" data-i18n="emailLabel">Email</label>
+        <input id="userEmailInput" type="email" placeholder="citizen@example.com" />
+      </div>
+    </div>
+    <div class="row">
+      <button id="authInitBtn" type="button" class="btn" data-i18n="connectBtn">Connect / Dev Login</button>
+      <button id="refreshShieldBtn" type="button" class="btn secondary small" data-i18n="recheckDomainBtn">Verify Portal</button>
+      <span id="domainReasonText" class="muted"></span>
+    </div>
+    <div class="row" style="margin-top: 4px; align-items: flex-end;">
+      <div style="flex: 1;">
+        <label class="field-label" for="vaultPassphraseInput" data-i18n="passphraseLabel">Local CryptoVault Passphrase</label>
+        <input id="vaultPassphraseInput" type="password" placeholder="AES-256-GCM Passphrase" />
+      </div>
+      <button id="unlockVaultBtn" type="button" class="btn secondary" data-i18n="unlockBtn">Unlock</button>
+      <button id="lockVaultBtn" type="button" class="btn secondary" data-i18n="lockBtn">Lock</button>
+      <span id="vaultLockBadge" class="badge warn">Locked</span>
+    </div>
+  </section>
+
+  <!-- View 2: Chat, Execution Plan & Bilingual Visual Guide View -->
+  <section class="card">
+    <h2>
+      <span data-i18n="agentChatTitle">Chat, Plan &amp; Visual Guide</span>
+      <span style="display: inline-flex; gap: 4px;">
+        <span id="activeToolBadge" class="badge info hidden">tool: -</span>
+        <span id="taskStateBadge" class="badge">Idle</span>
+      </span>
+    </h2>
+    <div id="chatFeed" class="feed">
+      <div class="muted" data-i18n="chatEmpty">Submit a goal or ask a visual guide question with the active portal tab.</div>
+    </div>
+
+    <!-- Execution Plan Steps -->
+    <div id="executionPlanBox" class="plan-box hidden">
+      <div class="field-label" data-i18n="executionPlanTitle">Execution Plan</div>
+      <div id="executionPlanList"></div>
+    </div>
+
+    <label class="field-label" for="goalInput" data-i18n="goalLabel">Goal or Question</label>
+    <textarea id="goalInput" placeholder="e.g. Apply for post-matric scholarship OR Where is IFSC on passbook?"></textarea>
+    <div class="row" style="margin-top: 6px;">
+      <button id="sendGoalBtn" type="button" class="btn" data-i18n="runStepBtn">Run Step</button>
+      <button id="inspectGuideBtn" type="button" class="btn secondary" data-i18n="visualGuideBtn">Visual Guide Q&amp;A</button>
+      <button id="reviewPendingBtn" type="button" class="btn secondary hidden" data-i18n="reviewApprovalBtn">Review &amp; Approve</button>
+    </div>
+
+    <!-- Clarification Input Box -->
+    <div id="clarificationBox" class="clarification-box hidden">
+      <div class="field-label" data-i18n="clarificationTitle">Clarification Needed</div>
+      <div id="clarificationQuestion" style="font-weight: 600; margin-bottom: 6px;"></div>
+      <div id="clarificationOptions" class="row" style="margin-bottom: 6px;"></div>
+      <div class="row" style="margin-bottom: 0;">
+        <div style="flex: 1;">
+          <input id="clarificationInput" type="text" placeholder="Type your answer..." />
+        </div>
+        <button id="sendClarificationBtn" type="button" class="btn small" data-i18n="sendClarificationBtn">Send Answer</button>
+      </div>
+    </div>
+
+    <!-- Contextual Bilingual Visual Guide Card -->
+    <div id="visualGuideCard" class="card hidden" style="margin-top: 8px; margin-bottom: 0; background: #f8fafc;">
+      <h2 style="margin-bottom: 4px;">
+        <span id="vgTitle">Visual Guide</span>
+        <span id="vgSampleBadge" class="badge">sample</span>
+      </h2>
+      <p id="vgExplanation" style="margin: 4px 0;"></p>
+      <div id="vgCallouts"></div>
+    </div>
+  </section>
+
+  <!-- View 3: Document Upload, 4-Stage Validation & User Verification (FR-037) -->
+  <section class="card">
+    <h2>
+      <span data-i18n="docVaultTitle">Document Upload &amp; Verification (FR-037)</span>
+      <span id="validationBadge" class="badge">No Doc</span>
+    </h2>
+    <div class="row">
+      <div style="flex: 1 1 42%;">
+        <label class="field-label" for="docTypeSelect" data-i18n="docTypeLabel">Document Type</label>
+        <select id="docTypeSelect">
+          <option value="unknown">Auto Detect</option>
+          <option value="pan">PAN Card</option>
+          <option value="aadhaar">Aadhaar Card</option>
+          <option value="bank_passbook">Bank Passbook</option>
+          <option value="marksheet">Marksheet</option>
+          <option value="income_certificate">Income Certificate</option>
+        </select>
+      </div>
+      <div style="flex: 1 1 54%;">
+        <label class="field-label" for="docFileInput" data-i18n="docFileLabel">Select Image or PDF</label>
+        <input id="docFileInput" type="file" accept="image/jpeg,image/png,image/webp,application/pdf" />
+      </div>
+    </div>
+    <button id="extractDocBtn" type="button" class="btn" data-i18n="extractBtn">Upload &amp; Extract (4-Stage)</button>
+
+    <div id="stageSummary" class="hidden" style="margin-top: 8px;"></div>
+    <div id="extractedFieldsList" style="margin-top: 8px;"></div>
+    <div id="mappedFieldsPreview" class="plan-box hidden" style="margin-top: 6px;"></div>
+
+    <div id="commitVaultControls" class="hidden" style="margin-top: 6px;">
+      <div class="row" style="align-items: flex-end;">
+        <div style="flex: 1;">
+          <label class="field-label" for="docVaultPassphraseInput" data-i18n="docPassphraseLabel">Vault Passphrase (if not unlocked above)</label>
+          <input id="docVaultPassphraseInput" type="password" placeholder="Enter passphrase to encrypt &amp; save" />
+        </div>
+        <button id="commitVaultBtn" type="button" class="btn" data-i18n="commitVaultBtn">Save Verified to Vault</button>
+      </div>
+    </div>
+    <div id="vaultRecordsList" class="muted" style="margin-top: 6px;"></div>
+  </section>
+
+  <!-- View 4: Action-Bound Review Card & Submission Receipt (FR-027 & FR-061) -->
+  <section id="actionBoundReviewCard" class="card hidden" style="border-color: #f59e0b; background: #fffbeb;">
+    <h2>
+      <span data-i18n="reviewCardTitle">Action-Bound Approval Required (FR-027)</span>
+      <span class="badge warn">pending_action_hash</span>
+    </h2>
+    <div style="margin-bottom: 6px;">
+      <span class="field-label" data-i18n="targetDomainLabel">Verified Domain</span>
+      <div id="inlineReviewDomain" class="mono"></div>
+    </div>
+    <div style="margin-bottom: 6px;">
+      <span class="field-label" data-i18n="actionHashLabel">Action-Bound SHA-256 Hash (pending_action_hash)</span>
+      <div id="inlineReviewHash" class="mono"></div>
+    </div>
+    <div id="inlineReviewFields" style="margin-bottom: 8px;"></div>
+    <div class="row" style="justify-content: flex-end; margin-bottom: 0;">
+      <button id="inlineRejectBtn" type="button" class="btn danger small" data-i18n="rejectBtn">Reject</button>
+      <button id="inlineApproveBtn" type="button" class="btn small" data-i18n="approveSubmitBtn">Approve &amp; Submit</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>
+      <span data-i18n="receiptTitle">Submission Receipt (FR-061)</span>
+      <span id="receiptBadge" class="badge">Pending</span>
+    </h2>
+    <div id="receiptBody" class="muted" data-i18n="receiptHint">After final submission, confirmed application_ref_no or unconfirmed warning appears here.</div>
+    <div class="row" style="margin-top: 6px; margin-bottom: 0;">
+      <button id="verifyReceiptBtn" type="button" class="btn secondary" data-i18n="verifyReceiptBtn">Scan &amp; Verify Receipt</button>
+    </div>
+  </section>
+
+  <!-- Action-Bound Review & Approval Modal (PRD FR-027) -->
+  <div id="approvalModalBackdrop" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="approvalModalTitle">
+    <div class="modal">
+      <h2 id="approvalModalTitle" style="margin: 0 0 6px 0;" data-i18n="approvalModalTitle">Action-Bound Review &amp; Approval</h2>
+      <p id="approvalModalSubtitle" class="muted" style="margin: 0 0 8px 0;"></p>
+      <div style="margin-bottom: 6px;">
+        <span class="field-label" data-i18n="targetDomainLabel">Verified Domain</span>
+        <div id="approvalTargetDomain" class="mono"></div>
+      </div>
+      <div style="margin-bottom: 6px;">
+        <span class="field-label" data-i18n="actionHashLabel">Action-Bound SHA-256 Hash (pending_action_hash)</span>
+        <div id="approvalActionHash" class="mono"></div>
+      </div>
+      <div style="margin-bottom: 8px;">
+        <span class="field-label" data-i18n="mappedFieldsLabel">Mapped Fields / Actions</span>
+        <div id="approvalMappedFields"></div>
+      </div>
+      <div class="row" style="justify-content: flex-end; margin-bottom: 0;">
+        <button id="approvalRejectBtn" type="button" class="btn danger" data-i18n="rejectBtn">Reject</button>
+        <button id="approvalConfirmBtn" type="button" class="btn" data-i18n="approveSubmitBtn">Approve &amp; Submit</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>

@@ -1,5 +1,6 @@
 """Ownership-enforced goal intake service routing through AgentGateway."""
 
+import inspect
 import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
