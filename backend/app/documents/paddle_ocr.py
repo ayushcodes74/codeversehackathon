@@ -7,7 +7,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
-from paddleocr import PaddleOCR
+
+try:
+    from paddleocr import PaddleOCR
+    HAS_PADDLE_OCR = True
+except (ImportError, Exception):
+    PaddleOCR = None
+    HAS_PADDLE_OCR = False
 
 _DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
 _LATIN_RE = re.compile(r"[A-Za-z]")
@@ -224,21 +230,29 @@ _NON_DOB_DATE_KEYWORDS = (
 )
 
 
-def _create_paddle_ocr(lang: str) -> PaddleOCR:
-    """Instantiate PaddleOCR across 2.x and 3.x APIs with quiet logging."""
-    for logger_name in ("paddleocr", "ppocr", "paddlex"):
-        logging.getLogger(logger_name).setLevel(logging.ERROR)
+def _create_paddle_ocr(lang: str) -> Any:
+    """Instantiate PaddleOCR across 2.x and 3.x APIs with quiet logging and graceful fallback."""
+    if not HAS_PADDLE_OCR or PaddleOCR is None:
+        return None
+    try:
+        for logger_name in ("paddleocr", "ppocr", "paddlex"):
+            logging.getLogger(logger_name).setLevel(logging.ERROR)
 
-    init_params = inspect.signature(PaddleOCR.__init__).parameters
-    if "use_textline_orientation" in init_params:
-        # PaddleOCR 3.x maps use_angle_cls -> use_textline_orientation, rejects show_log,
-        # and hits a PIR oneDNN bug on PaddlePaddle 3.3 CPU unless enable_mkldnn=False.
-        return PaddleOCR(
-            lang=lang,
-            use_textline_orientation=True,
-            enable_mkldnn=False,
+        init_params = inspect.signature(PaddleOCR.__init__).parameters
+        if "use_textline_orientation" in init_params:
+            # PaddleOCR 3.x maps use_angle_cls -> use_textline_orientation, rejects show_log,
+            # and hits a PIR oneDNN bug on PaddlePaddle 3.3 CPU unless enable_mkldnn=False.
+            return PaddleOCR(
+                lang=lang,
+                use_textline_orientation=True,
+                enable_mkldnn=False,
+            )
+        return PaddleOCR(lang=lang, use_angle_cls=True, show_log=False)
+    except Exception as exc:
+        logging.getLogger("app.documents.paddle_ocr").warning(
+            "PaddleOCR initialization failed for lang=%s: %s", lang, exc
         )
-    return PaddleOCR(lang=lang, use_angle_cls=True, show_log=False)
+        return None
 
 
 def _polygon_to_bbox(poly: Any) -> Dict[str, int]:
@@ -335,7 +349,13 @@ class BilingualDocumentOCR:
         if image is None:
             raise ValueError("Failed to decode image bytes with OpenCV.")
 
-        engine = self._engines[lang_key]
+        engine = self._engines.get(lang_key)
+        if engine is None:
+            logging.getLogger("app.documents.paddle_ocr").warning(
+                "PaddleOCR engine not loaded for lang=%s. Returning empty line extractions.", lang_key
+            )
+            return []
+
         if hasattr(engine, "predict"):
             raw_results = engine.predict(image)
         else:
