@@ -308,8 +308,63 @@ async def execute_agent_turn(
     task.current_step_index = inspect_out.current_step_number
     task.total_steps = inspect_out.total_steps
 
-    # Case A: Post-Submission Receipt / Acknowledgement Screen (PRD FR-061)
+    # Case A: Post-Submission Receipt / Acknowledgement Screen (PRD FR-061 & FR-027)
     if inspect_out.page_type == "acknowledgement_receipt":
+        if not await _has_verified_submit_approval(db, task.id):
+            task.status = TaskState.AWAITING_SUBMIT_APPROVAL.value
+            task.checkpoint_state = {
+                **(task.checkpoint_state or {}),
+                "awaiting_approval": True,
+                "blocked_reason": "missing_verified_submit_approval",
+            }
+            await db.flush()
+
+            pending_action_hash = _compute_pending_action_hash(task)
+            approval_out = await request_approval_tool(
+                RequestApprovalInput(
+                    action_type="submit_form",
+                    summary_of_changes={"reason": "DOM receipt detected without verified human submit approval"},
+                    button_selector="#btn-final-submit",
+                    button_text="Submit Application",
+                    warning_message_en=(
+                        "Submission blocked: No verified human approval record exists in audit logs. "
+                        "Approve via /approval before finalizing."
+                    ),
+                    warning_message_hi=(
+                        "सबमिशन अवरुद्ध: कोई सत्यापित मानवीय स्वीकृति रिकॉर्ड नहीं मिला। "
+                        "अंतिम पुष्टि से पहले /approval के माध्यम से स्वीकृति दें।"
+                    ),
+                )
+            )
+            approval_out.action_payload["action_hash"] = pending_action_hash
+            approval_out.action_payload["approval_endpoint"] = f"/api/v1/tasks/{task.id}/approval"
+
+            await audit_log_tool_call(
+                db,
+                task.id,
+                "capture_receipt_blocked",
+                "rejected",
+                {"url": url, "page_type": inspect_out.page_type},
+                {"reason": "No verified task_submit_approval record found", "status": task.status},
+            )
+
+            msg_en = "Submission transition rejected: verified human approval via /approval is required before completing submission."
+            msg_hi = "जमा स्थिति अस्वीकार की गई: पूर्ण करने से पहले सत्यापित मानवीय स्वीकृति आवश्यक है।"
+            return AgentStepResponse(
+                task_id=task.id,
+                response_type="approval_request",
+                intent_lane="form_automation",
+                message=msg_hi if lang == "hi" else msg_en,
+                message_hi=msg_hi,
+                next_tool="request_approval",
+                approval_request=approval_out,
+                client_actions=[],
+                checkpoint_saved=True,
+                current_step_index=task.current_step_index,
+                total_steps=task.total_steps,
+                status=task.status,
+            )
+
         receipt_in = CaptureReceiptInput(dom_snapshot=dom)
         receipt_out = await capture_receipt_tool(receipt_in)
         await audit_log_tool_call(

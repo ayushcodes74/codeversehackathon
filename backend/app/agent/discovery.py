@@ -94,7 +94,7 @@ async def check_domain_shield(url: str, db: AsyncSession) -> VerifyDomainOutput:
 
     for portal in portals:
         approved_domain = portal.domain.lower().strip().removeprefix("www.")
-        if host == approved_domain or host.endswith(f".{approved_domain}"):
+        if host == approved_domain:
             return VerifyDomainOutput(
                 is_allowed=True,
                 domain=host,

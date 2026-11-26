@@ -6,16 +6,36 @@
   "permissions": [
     "storage",
     "activeTab",
-    "scripting"
+    "scripting",
+    "sidePanel"
   ],
   "host_permissions": [
-    "http://*/*",
-    "https://*/*",
-    "file:///*"
+    "https://scholarships.gov.in/*",
+    "https://www.incometax.gov.in/*",
+    "https://parivahan.gov.in/*",
+    "https://uidai.gov.in/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
   ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "Universal AI Web Assistant"
+  },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
+      "matches": [
+        "https://scholarships.gov.in/*",
+        "https://www.incometax.gov.in/*",
+        "https://parivahan.gov.in/*",
+        "https://uidai.gov.in/*",
+        "http://localhost/*",
+        "http://127.0.0.1/*"
+      ],
       "js": [
         "src/content/dom_inspector.js",
         "src/content/action_executor.js"

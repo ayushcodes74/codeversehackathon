@@ -7,12 +7,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.agent.discovery import check_domain_shield
 from app.agent.orchestrator import execute_agent_turn
 from app.api.db_routes import ALLOWED_STATE_TRANSITIONS, TaskState
 from app.database import AsyncSessionLocal
+from app.models import ConversationMessage, User
 from app.schemas.agent_contracts import AgentChatRequest
+from app.schemas.common import normalize_language_code
 from app.schemas.clarification import (
     ClarificationAnswerRequest,
     ClarificationAnswerResponse,
@@ -101,11 +105,26 @@ class OrchestratorAgentGateway(AgentGateway):
             current_url=payload.current_url,
         )
 
+        async def _run_submit_goal(session: AsyncSession):
+            step_res = await execute_agent_turn(chat_req, session)
+            nav_act = next(
+                (a for a in step_res.client_actions if a.action_type == "NAVIGATE" and a.value_or_vault_ref),
+                None,
+            )
+            shield_res = None
+            if (
+                not (portal_context and portal_context.is_official)
+                and nav_act
+                and nav_act.value_or_vault_ref
+            ):
+                shield_res = await check_domain_shield(nav_act.value_or_vault_ref, session)
+            return step_res, nav_act, shield_res
+
         if db is not None:
-            step = await execute_agent_turn(chat_req, db)
+            step, nav_action, domain_shield = await _run_submit_goal(db)
         else:
             async with AsyncSessionLocal() as session:
-                step = await execute_agent_turn(chat_req, session)
+                step, nav_action, domain_shield = await _run_submit_goal(session)
                 await session.commit()
 
         task_id = step.task_id or uuid.uuid4()
@@ -122,20 +141,26 @@ class OrchestratorAgentGateway(AgentGateway):
                 entry_url=payload.current_url or f"https://{portal_context.domain}",
                 support_tier=portal_context.support_tier,
             )
-        else:
-            nav_action = next(
-                (a for a in step.client_actions if a.action_type == "NAVIGATE" and a.value_or_vault_ref),
-                None,
-            )
-            if nav_action and nav_action.value_or_vault_ref:
-                entry_url = nav_action.value_or_vault_ref
-                domain = (urlparse(entry_url).hostname or "").lower().removeprefix("www.") or "gov.in"
-                recommended_portal = GoalPortalRecommendation(
-                    portal_name=nav_action.description.replace("Navigating to ", "") or domain,
-                    domain=domain,
-                    entry_url=entry_url,
-                    support_tier=PortalSupportTier.VERIFIED_OFFICIAL,
+        elif nav_action and nav_action.value_or_vault_ref:
+            entry_url = nav_action.value_or_vault_ref
+            parsed_host = (urlparse(entry_url).hostname or "").lower().removeprefix("www.")
+            domain = (domain_shield.domain if domain_shield and domain_shield.domain else parsed_host) or "unknown"
+            if domain_shield and domain_shield.shield_status == "VERIFIED_OFFICIAL":
+                support_tier = (
+                    PortalSupportTier.VERIFIED_OFFICIAL
+                    if domain.endswith((".gov.in", ".nic.in"))
+                    else PortalSupportTier.KNOWN_PORTAL
                 )
+            elif domain_shield and domain_shield.shield_status == "LOCAL_DEV_ALLOWED":
+                support_tier = PortalSupportTier.KNOWN_PORTAL
+            else:
+                support_tier = PortalSupportTier.BLOCKED
+            recommended_portal = GoalPortalRecommendation(
+                portal_name=nav_action.description.replace("Navigating to ", "") or domain,
+                domain=domain,
+                entry_url=entry_url,
+                support_tier=support_tier,
+            )
 
         clarification_prompt: ClarificationPrompt | None = None
         if step.response_type == "clarification":
@@ -176,6 +201,33 @@ class OrchestratorAgentGateway(AgentGateway):
             created_at=datetime.now(timezone.utc),
         )
 
+    async def _resolve_clarification_language(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        task_id: uuid.UUID,
+        explicit_language: str | None = None,
+    ) -> str:
+        candidate = explicit_language
+        if not candidate:
+            msg_stmt = (
+                select(ConversationMessage.language)
+                .where(ConversationMessage.task_id == task_id)
+                .order_by(ConversationMessage.created_at.desc())
+                .limit(1)
+            )
+            candidate = (await session.execute(msg_stmt)).scalar_one_or_none()
+        if not candidate:
+            user_stmt = select(User.preferred_language).where(User.id == user_id)
+            candidate = (await session.execute(user_stmt)).scalar_one_or_none()
+        if not candidate:
+            return "en"
+        try:
+            return normalize_language_code(candidate)
+        except ValueError:
+            return "en"
+
     async def submit_clarification(
         self,
         *,
@@ -183,6 +235,7 @@ class OrchestratorAgentGateway(AgentGateway):
         task_id: uuid.UUID,
         current_state: TaskState,
         sanitized_payload: ClarificationAnswerRequest,
+        language: str | None = None,
         db: AsyncSession | None = None,
     ) -> ClarificationAnswerResponse:
         answer_msg = (
@@ -190,17 +243,28 @@ class OrchestratorAgentGateway(AgentGateway):
             or sanitized_payload.selected_option_id
             or (json.dumps(sanitized_payload.field_values) if sanitized_payload.field_values else "Approved")
         )
-        chat_req = AgentChatRequest(
-            user_id=user_id,
-            task_id=task_id,
-            message=answer_msg,
-            language="en",
-        )
+        explicit_lang = language or getattr(sanitized_payload, "language", None)
+
+        async def _run_clarification(session: AsyncSession):
+            resolved_lang = await self._resolve_clarification_language(
+                session,
+                user_id=user_id,
+                task_id=task_id,
+                explicit_language=explicit_lang,
+            )
+            chat_req = AgentChatRequest(
+                user_id=user_id,
+                task_id=task_id,
+                message=answer_msg,
+                language=resolved_lang,
+            )
+            return await execute_agent_turn(chat_req, session)
+
         if db is not None:
-            step = await execute_agent_turn(chat_req, db)
+            step = await _run_clarification(db)
         else:
             async with AsyncSessionLocal() as session:
-                step = await execute_agent_turn(chat_req, session)
+                step = await _run_clarification(session)
                 await session.commit()
 
         try:

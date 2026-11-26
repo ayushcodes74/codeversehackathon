@@ -12,6 +12,7 @@ from app.agent.visual_guides import VISUAL_GUIDE_REGISTRY, get_visual_guide_card
 from app.api.db_routes import (
     TERMINAL_TASK_STATES,
     TaskState,
+    _extract_caller_id,
     verify_caller_ownership,
 )
 from app.database import get_db
@@ -110,15 +111,16 @@ async def pause_task(
     authorization: Optional[str] = Header(default=None, alias="Authorization"),
 ):
     """Safely pause an active task in canonical awaiting_user_input state."""
+    caller_id = _extract_caller_id(x_user_id=x_user_id, authorization=authorization)
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    verify_caller_ownership(
-        str(task.user_id),
-        x_user_id=x_user_id,
-        authorization=authorization,
-    )
+    if caller_id != str(task.user_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: caller identity does not match requested user_id.",
+        )
 
     if task.status in {s.value for s in TERMINAL_TASK_STATES}:
         raise HTTPException(
@@ -144,15 +146,16 @@ async def resume_task(
     authorization: Optional[str] = Header(default=None, alias="Authorization"),
 ):
     """Resume a paused task from its last saved checkpoint into canonical TaskState."""
+    caller_id = _extract_caller_id(x_user_id=x_user_id, authorization=authorization)
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    verify_caller_ownership(
-        str(task.user_id),
-        x_user_id=x_user_id,
-        authorization=authorization,
-    )
+    if caller_id != str(task.user_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: caller identity does not match requested user_id.",
+        )
 
     if task.status in {s.value for s in TERMINAL_TASK_STATES}:
         raise HTTPException(

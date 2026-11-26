@@ -1,11 +1,11 @@
 """Async SQLAlchemy database engine, settings, and session dependency."""
 
 from pathlib import Path
-from sqlalchemy.pool import NullPool
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.pool import AsyncAdaptedQueuePool
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 
@@ -39,7 +39,11 @@ settings = Settings()
 engine = create_async_engine(
     settings.database_url,
     echo=False,
-    poolclass=NullPool,
+    poolclass=AsyncAdaptedQueuePool,
+    pool_size=5,
+    max_overflow=10,
+    pool_pre_ping=True,
+    pool_recycle=300,
     connect_args={"statement_cache_size": 0},
 )
 

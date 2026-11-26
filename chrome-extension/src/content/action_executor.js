@@ -2,7 +2,10 @@
  * Action Executor - Content Script for Universal AI Web Assistant
  *
  * Reliably executes browser automation actions:
- * 1. Resolves vault: reference tokens locally (Zero-Leak Hybrid Storage).
+ * 1. Resolves canonical `vault:<profileId>.<docType>.<fieldKey>` tokens strictly via
+ *    the extension-origin Background Service Worker (`RESOLVE_VAULT_TOKENS` over
+ *    `chrome.runtime.sendMessage`), keeping `ua_local_vault_db` and `chrome.storage.session`
+ *    isolated inside `chrome-extension://<id>` rather than the portal page origin.
  * 2. Uses native prototype value setters + bubbling input/change/blur events
  *    to guarantee React/Vue/Angular controlled component state synchronization.
  * 3. Reads back filled values for verification.
@@ -12,37 +15,100 @@
 (function () {
   'use strict';
 
-  // Local Secure Vault Token Mock / Storage Resolver
-  // In production, this decrypts from Chrome Encrypted Storage with user biometric/master PIN
-  const LOCAL_VAULT_STORE = {
-    'vault:self.pan.id_number': 'ABCDE1234F',
-    'vault:self.aadhaar.id_number': '2345 6789 0123',
-    'vault:self.bank.account_number': '98765432101234',
-    'vault:self.bank.ifsc_code': 'SBIN0001234',
-    'vault:father.pan.id_number': 'FGHIJ5678K',
-    'vault:father.aadhaar.id_number': '8765 4321 0987',
-  };
+  function getFallbackVaultModule() {
+    // Only used in non-extension Node/unit-test environments where chrome.runtime.sendMessage is absent.
+    if (typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.sendMessage === 'function') {
+      return null;
+    }
+    if (typeof globalThis !== 'undefined' && globalThis.CryptoVault) {
+      return globalThis.CryptoVault;
+    }
+    if (typeof require === 'function') {
+      try {
+        return require('../../dist/vault/cryptoVault.js');
+      } catch (_err) {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  function hasExtensionBridge() {
+    return typeof chrome !== 'undefined' && chrome.runtime && typeof chrome.runtime.sendMessage === 'function';
+  }
 
   /**
-   * Resolves a value, substituting local decrypted vault tokens if applicable
+   * Requests extension-origin vault resolution from background.js via RESOLVE_VAULT_TOKENS.
    */
-  async function resolveValue(valueOrVaultRef) {
+  async function requestBackgroundVaultTokens(tokens, options) {
+    if (!tokens || tokens.length === 0) {
+      return {};
+    }
+    if (options && options.resolvedTokens) {
+      return options.resolvedTokens;
+    }
+
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(
+        {
+          action: 'RESOLVE_VAULT_TOKENS',
+          tokens,
+          taskId: options && options.taskId ? options.taskId : null,
+          approvalGrantId: options && options.approvalGrantId ? options.approvalGrantId : null,
+        },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+            return;
+          }
+          if (!response || !response.success) {
+            reject(new Error((response && response.error) || 'Failed to resolve vault tokens in background service worker.'));
+            return;
+          }
+          resolve(response.resolved || {});
+        }
+      );
+    });
+  }
+
+  /**
+   * Resolves a literal value or a `vault:<profileId>.<docType>.<fieldKey>` token.
+   */
+  async function resolveValue(valueOrVaultRef, options) {
     if (!valueOrVaultRef) return '';
 
-    if (valueOrVaultRef.startsWith('vault:')) {
-      // 1. Try Chrome sync/local storage
-      if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-        const stored = await chrome.storage.local.get([valueOrVaultRef]);
-        if (stored && stored[valueOrVaultRef]) {
-          return stored[valueOrVaultRef];
+    if (typeof valueOrVaultRef === 'string' && valueOrVaultRef.startsWith('vault:')) {
+      if (options && options.resolvedTokens && Object.prototype.hasOwnProperty.call(options.resolvedTokens, valueOrVaultRef)) {
+        return options.resolvedTokens[valueOrVaultRef];
+      }
+
+      if (options && options.vault && typeof options.vault.resolveVaultToken === 'function') {
+        const resolved = await options.vault.resolveVaultToken(valueOrVaultRef, {
+          passphrase: options.passphrase,
+          allowUnverified: Boolean(options.allowUnverified),
+        });
+        return resolved == null ? '' : resolved;
+      }
+
+      if (hasExtensionBridge()) {
+        const resolvedMap = await requestBackgroundVaultTokens([valueOrVaultRef], options);
+        const resolved = resolvedMap[valueOrVaultRef];
+        if (resolved === null || resolved === undefined) {
+          console.warn(`[ActionExecutor] Vault token ${valueOrVaultRef} missing in background response.`);
+          return '';
         }
+        return resolved;
       }
-      // 2. Fallback to local vault store
-      if (LOCAL_VAULT_STORE[valueOrVaultRef]) {
-        return LOCAL_VAULT_STORE[valueOrVaultRef];
+
+      const vaultMod = getFallbackVaultModule();
+      if (!vaultMod || typeof vaultMod.resolveVaultToken !== 'function') {
+        throw new Error('Encrypted CryptoVault bridge is not available.');
       }
-      console.warn(`[ActionExecutor] Vault token ${valueOrVaultRef} not found in local vault.`);
-      return '';
+      const resolved = await vaultMod.resolveVaultToken(valueOrVaultRef, {
+        passphrase: options && options.passphrase,
+        allowUnverified: Boolean(options && options.allowUnverified),
+      });
+      return resolved == null ? '' : resolved;
     }
 
     return valueOrVaultRef;
@@ -95,7 +161,7 @@
   /**
    * Executes a single ClientAction
    */
-  async function executeSingleAction(action) {
+  async function executeSingleAction(action, options) {
     const el = findElement(action);
     if (!el && action.action_type !== 'NAVIGATE') {
       return {
@@ -108,7 +174,19 @@
     try {
       switch (action.action_type) {
         case 'FILL_FIELD': {
-          const resolvedValue = await resolveValue(action.value_or_vault_ref);
+          const isVaultRef =
+            typeof action.value_or_vault_ref === 'string' &&
+            action.value_or_vault_ref.startsWith('vault:');
+          const resolvedValue = await resolveValue(action.value_or_vault_ref, options);
+
+          if (isVaultRef && !resolvedValue) {
+            return {
+              action,
+              success: false,
+              error: `Vault token ${action.value_or_vault_ref} not found in encrypted local vault.`
+            };
+          }
+
           el.scrollIntoView({ behavior: 'smooth', block: 'center' });
           el.focus();
 
@@ -166,20 +244,34 @@
           return { action, success: false, error: `Unsupported action type: ${action.action_type}` };
       }
     } catch (err) {
-      return { action, success: false, error: err.message };
+      return { action, success: false, error: err && err.message ? err.message : String(err) };
     }
   }
 
   /**
-   * Executes a batch of ClientActions sequentially
+   * Executes a batch of ClientActions sequentially after batch-resolving approved vault tokens
+   * from the extension-origin Background Service Worker.
    */
-  async function executeActions(actions) {
+  async function executeActions(actions, options) {
+    let scopedOptions = options || {};
+    const vaultTokens = Array.from(
+      new Set(
+        (actions || [])
+          .filter((a) => a && a.action_type === 'FILL_FIELD' && typeof a.value_or_vault_ref === 'string' && a.value_or_vault_ref.startsWith('vault:'))
+          .map((a) => a.value_or_vault_ref)
+      )
+    );
+
+    if (vaultTokens.length > 0 && hasExtensionBridge() && !(options && options.vault) && !(options && options.resolvedTokens)) {
+      const resolvedTokens = await requestBackgroundVaultTokens(vaultTokens, scopedOptions);
+      scopedOptions = { ...scopedOptions, resolvedTokens };
+    }
+
     const results = [];
-    for (const act of actions) {
-      const res = await executeSingleAction(act);
+    for (const act of actions || []) {
+      const res = await executeSingleAction(act, scopedOptions);
       results.push(res);
-      // Small 80ms delay between field fills to simulate human pacing and let DOM settle
-      await new Promise(r => setTimeout(r, 80));
+      await new Promise((r) => setTimeout(r, 80));
     }
     return results;
   }
@@ -188,11 +280,9 @@
    * Scans DOM for post-submit acknowledgement receipt number
    */
   function captureReceipt() {
-    const text = document.body.innerText;
-    // Regex matching APP-2026-XXXXX or ACK-XXXXXX
-    const match = text.match(/\b(APP-\d{4}-\d{4,6}|ACK-\d{6,10})\b/);
+    const text = document.body.innerText || '';
+    const match = text.match(/\b(APP-\d{4}-\d{4,6}|ACK-\d{6,10}|ECI-\d{4}-\d{4,6})\b/i);
     const receiptRef = match ? match[1] : null;
-
     const receiptBox = document.getElementById('acknowledgement-receipt') || document.querySelector('.receipt-box');
 
     return {
@@ -202,30 +292,46 @@
     };
   }
 
-  // Export to global scope
-  window.ActionExecutor = {
+  const fallbackVault = getFallbackVaultModule();
+  const api = {
     executeActions,
     executeSingleAction,
     resolveValue,
     captureReceipt,
-    LOCAL_VAULT_STORE
+    CANONICAL_VAULT_KEYS: fallbackVault ? fallbackVault.CANONICAL_VAULT_KEYS : null,
   };
 
-  // Chrome Extension message listener
+  if (typeof window !== 'undefined') {
+    window.ActionExecutor = api;
+  }
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = api;
+  }
+
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
-    chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-      if (request.action === 'EXECUTE_ACTIONS') {
-        executeActions(request.actions || []).then(results => {
-          sendResponse({ success: true, results });
-        });
-        return true; // Keep message channel open for async response
-      } else if (request.action === 'CAPTURE_RECEIPT') {
+    chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
+      if (request && request.action === 'EXECUTE_ACTIONS') {
+        const execOptions = {
+          taskId: request.taskId || null,
+          approvalGrantId: request.approvalGrantId || null,
+          allowUnverified: Boolean(request.allowUnverified),
+        };
+        executeActions(request.actions || [], execOptions)
+          .then((results) => {
+            sendResponse({ success: true, results });
+          })
+          .catch((err) => {
+            sendResponse({ success: false, error: err && err.message ? err.message : String(err) });
+          });
+        return true;
+      } else if (request && request.action === 'CAPTURE_RECEIPT') {
         const receipt = captureReceipt();
         sendResponse({ success: true, receipt });
         return true;
       }
+      return false;
     });
   }
 
-  console.log('[Universal AI Assistant] Action Executor Content Script Loaded.');
+  console.log('[Universal AI Assistant] Action Executor Content Script Loaded (SW Vault Bridge).');
 })();
