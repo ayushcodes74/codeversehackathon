@@ -9,7 +9,7 @@ import type {
   EncryptedVaultEnvelope,
   LocalVaultDocumentRecord,
   VaultReferenceToken,
-} from "../../../../shared-contracts/schemas/documents";
+} from "../../../shared-contracts/schemas/documents";
 
 const PBKDF2_ITERATIONS = 150_000;
 const SALT_BYTES = 16;
@@ -18,6 +18,27 @@ const DEFAULT_DB_NAME = "ua_local_vault_db";
 const DB_VERSION = 1;
 const RECORDS_STORE = "records";
 const BLOBS_STORE = "blobs";
+
+export const VALID_DOCUMENT_TYPES: ReadonlySet<DocumentType> = new Set<DocumentType>([
+  "aadhaar",
+  "pan",
+  "bank_passbook",
+  "marksheet",
+  "income_certificate",
+  "caste_certificate",
+  "passport_photo",
+  "signature",
+  "unknown",
+]);
+
+/**
+ * Canonical vault field keys aligned with backend `tool_registry.py` and `field_mapper.py`.
+ */
+export const CANONICAL_VAULT_KEYS = {
+  pan: ["pan_number"],
+  aadhaar: ["aadhaar_number"],
+  bank_passbook: ["account_number", "ifsc_code"],
+} as const;
 
 export interface VaultRecordSummary {
   recordId: string;
@@ -171,13 +192,28 @@ export async function decryptPayload(
   return new TextDecoder().decode(plainBuffer);
 }
 
-function parseVaultToken(token: string): {
+export interface ParsedVaultToken {
   profileId: string;
   docType: DocumentType;
   fieldKey: string;
-} {
-  if (!token.startsWith("vault:")) {
-    throw new Error(`Invalid vault token prefix: ${token}`);
+  canonicalToken: VaultReferenceToken;
+}
+
+/**
+ * Standardize a vault reference token to the canonical schema:
+ * - pan.pan_number
+ * - aadhaar.aadhaar_number
+ * - bank_passbook.account_number
+ * - bank_passbook.ifsc_code
+ */
+export function standardizeVaultToken(token: string): VaultReferenceToken {
+  const parsed = parseVaultToken(token);
+  return parsed.canonicalToken;
+}
+
+export function parseVaultToken(token: string): ParsedVaultToken {
+  if (!token || !token.startsWith("vault:")) {
+    throw new Error(`Invalid vault token prefix: ${String(token)}`);
   }
   const body = token.slice("vault:".length);
   const parts = body.split(".");
@@ -186,10 +222,31 @@ function parseVaultToken(token: string): {
       `Malformed vault token '${token}'. Expected 'vault:<profileId>.<docType>.<fieldKey>'.`
     );
   }
+
+  const profileId = parts[0].trim();
+  const rawDocType = parts[1].trim();
+  const rawFieldKey = parts[2].trim();
+
+  const docTypeStr = rawDocType === "bank" ? "bank_passbook" : rawDocType;
+  if (!VALID_DOCUMENT_TYPES.has(docTypeStr as DocumentType)) {
+    throw new Error(
+      `Unsupported vault document type '${rawDocType}' in token '${token}'.`
+    );
+  }
+  const docType = docTypeStr as DocumentType;
+
+  let fieldKey = rawFieldKey;
+  if (docType === "aadhaar" && rawFieldKey === "id_number") {
+    fieldKey = "aadhaar_number";
+  } else if (docType === "pan" && rawFieldKey === "id_number") {
+    fieldKey = "pan_number";
+  }
+
   return {
-    profileId: parts[0],
-    docType: parts[1] as DocumentType,
-    fieldKey: parts[2],
+    profileId,
+    docType,
+    fieldKey,
+    canonicalToken: `vault:${profileId}.${docType}.${fieldKey}` as VaultReferenceToken,
   };
 }
 
@@ -378,7 +435,14 @@ export class LocalEncryptedVault {
     for (const row of candidates) {
       const decryptedJson = await decryptPayload(row.envelope, passphrase);
       const record = JSON.parse(decryptedJson) as LocalVaultDocumentRecord;
-      const field = record.extractedFields?.[fieldKey];
+      let field = record.extractedFields?.[fieldKey];
+      // Support OCR records stored with legacy `id_number` when resolving canonical Aadhaar/PAN tokens.
+      if (!field && docType === "aadhaar" && fieldKey === "aadhaar_number") {
+        field = record.extractedFields?.["id_number"];
+      } else if (!field && docType === "pan" && fieldKey === "pan_number") {
+        field = record.extractedFields?.["id_number"];
+      }
+
       if (field && typeof field.value === "string" && field.value.length > 0) {
         if (field.verifiedByUser === false && !options?.allowUnverified) {
           throw new Error(
@@ -408,4 +472,38 @@ export class LocalEncryptedVault {
       db.close();
     }
   }
+}
+
+let sharedDefaultVault: LocalEncryptedVault | null = null;
+
+/**
+ * Return a `LocalEncryptedVault` backed by `ua_local_vault_db` in IndexedDB.
+ */
+export function getLocalVault(
+  dbName: string = DEFAULT_DB_NAME,
+  defaultPassphrase?: string
+): LocalEncryptedVault {
+  if (
+    !sharedDefaultVault ||
+    dbName !== DEFAULT_DB_NAME ||
+    defaultPassphrase !== undefined
+  ) {
+    sharedDefaultVault = new LocalEncryptedVault(dbName, defaultPassphrase);
+  }
+  return sharedDefaultVault;
+}
+
+/**
+ * Convenience top-level `resolveVaultToken(...)` wrapper delegating to `LocalEncryptedVault`.
+ */
+export async function resolveVaultToken(
+  token: VaultReferenceToken | string,
+  passphraseOrOptions?: string | ResolveVaultTokenOptions,
+  maybeOptions?: ResolveVaultTokenOptions
+): Promise<string | null> {
+  return getLocalVault().resolveVaultToken(
+    token,
+    passphraseOrOptions,
+    maybeOptions
+  );
 }

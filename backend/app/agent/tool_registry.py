@@ -7,13 +7,14 @@ Enforces:
 """
 
 from __future__ import annotations
+from datetime import datetime, timezone
 import re
 import uuid
 from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from app.models import ToolAuditLog, ApprovedPortal, Task, AgentMemory
+from app.models import ToolAuditLog, ApprovedPortal, Task
 from app.schemas.agent_contracts import (
     UnderstandUserGoalInput, UnderstandUserGoalOutput,
     GenerateTaskPlanInput, GenerateTaskPlanOutput, PlanStep,
@@ -35,6 +36,10 @@ from app.schemas.agent_contracts import (
 )
 from app.agent.discovery import check_domain_shield
 from app.agent.visual_guides import get_visual_guide_card
+from app.documents.agent_tools import (
+    run_document_extraction_tool,
+    run_map_form_fields_tool,
+)
 
 
 # =====================================================================
@@ -266,80 +271,145 @@ async def extract_page_information_tool(payload: ExtractPageInformationInput) ->
     )
 
 
-# 7. extract_document
-async def extract_document_tool(payload: ExtractDocumentInput) -> ExtractDocumentOutput:
-    doc = payload.document_type.lower()
-    slug = payload.profile_slug
-    mapping = {}
-    fields = []
+_VAULT_TOKEN_RE = re.compile(
+    r"^vault:[a-zA-Z0-9_-]+\.(aadhaar|pan|bank_passbook|marksheet|income_certificate|caste_certificate|passport_photo|signature|unknown)\.[a-zA-Z0-9_]+$"
+)
 
-    try:
-        from app.documents.agent_tools import DOCUMENT_TOOL_DEFINITIONS, DocumentType
-    except Exception:
-        pass
 
+def _normalize_doc_type_hint(raw_doc_type: str) -> str:
+    doc = (raw_doc_type or "").strip().lower()
     if "pan" in doc:
-        fields = ["pan_number", "full_name", "father_name", "dob"]
-        mapping = {
-            "pan_number": f"vault:{slug}.pan.id_number",
-            "full_name": f"vault:{slug}.pan.full_name",
-        }
-    elif "aadhaar" in doc:
-        fields = ["aadhaar_number", "full_name", "gender", "dob", "address"]
-        mapping = {
-            "aadhaar_number": f"vault:{slug}.aadhaar.id_number",
-            "full_name": f"vault:{slug}.aadhaar.full_name",
-        }
-    elif "bank" in doc or "passbook" in doc:
-        fields = ["account_number", "ifsc_code", "bank_name", "branch_name"]
-        mapping = {
-            "account_number": f"vault:{slug}.bank.account_number",
-            "ifsc_code": f"vault:{slug}.bank.ifsc_code",
-        }
-    else:
-        fields = ["id_number", "full_name", "issue_date"]
-        mapping = {
-            "id_number": f"vault:{slug}.{doc}.id_number",
-            "full_name": f"vault:{slug}.{doc}.full_name",
-        }
+        return "pan"
+    if "aadhaar" in doc or "aadhar" in doc or "uid" in doc:
+        return "aadhaar"
+    if "bank" in doc or "passbook" in doc:
+        return "bank_passbook"
+    if "mark" in doc:
+        return "marksheet"
+    if "income" in doc:
+        return "income_certificate"
+    if "caste" in doc:
+        return "caste_certificate"
+    if "photo" in doc:
+        return "passport_photo"
+    if "sign" in doc:
+        return "signature"
+    return doc or "unknown"
+
+
+def _standardize_vault_token(source_ref: str) -> str:
+    """Normalize vault reference tokens to match shared-contracts/schemas/documents.ts."""
+    if source_ref.endswith(".aadhaar.id_number"):
+        return source_ref[: -len(".id_number")] + ".aadhaar_number"
+    return source_ref
+
+
+# 7. extract_document
+async def extract_document_tool(
+    payload: ExtractDocumentInput,
+    file_bytes: bytes | None = None,
+    mime_type: str = "application/pdf",
+    profile_full_name: str | None = None,
+    language: str = "en",
+    portal_constraints: dict[str, Any] | None = None,
+) -> ExtractDocumentOutput:
+    raw_bytes = file_bytes if file_bytes is not None else getattr(payload, "file_bytes", None)
+    resolved_mime = getattr(payload, "mime_type", None) or mime_type
+    expected_doc = _normalize_doc_type_hint(payload.document_type)
+    slug = payload.profile_slug or "self"
+
+    if not raw_bytes:
+        raise ValueError(
+            "extract_document_tool requires raw file_bytes (hardcoded stub responses are disabled)."
+        )
+
+    extraction = run_document_extraction_tool(
+        file_bytes=raw_bytes,
+        mime_type=resolved_mime,
+        expected_doc_type=expected_doc,
+        profile_id=slug,
+        profile_full_name=profile_full_name,
+        language=language,
+        portal_constraints=portal_constraints,
+    )
+    detected_doc = extraction.detected_doc_type.value
+    available_fields: list[str] = []
+    vault_token_mapping: dict[str, str] = {}
+    for field in extraction.fields:
+        key = "aadhaar_number" if (detected_doc == "aadhaar" and field.key == "id_number") else field.key
+        available_fields.append(key)
+        vault_token_mapping[key] = f"vault:{slug}.{detected_doc}.{key}"
 
     return ExtractDocumentOutput(
-        document_type=payload.document_type,
+        document_type=detected_doc,
         profile_slug=slug,
-        available_fields=fields,
-        vault_token_mapping=mapping
+        available_fields=available_fields,
+        vault_token_mapping=vault_token_mapping,
     )
 
 
 # 8. validate_document
-async def validate_document_tool(payload: ValidateDocumentInput) -> ValidateDocumentOutput:
-    ref = payload.vault_token_or_ref
-    is_vault = ref.startswith("vault:")
-    checks = ["vault_token_format_valid"]
-    errors = []
+async def validate_document_tool(
+    payload: ValidateDocumentInput,
+    file_bytes: bytes | None = None,
+    mime_type: str = "image/jpeg",
+    profile_id: str = "self",
+    profile_full_name: str | None = None,
+    language: str = "en",
+    portal_constraints: dict[str, Any] | None = None,
+) -> ValidateDocumentOutput:
+    raw_bytes = file_bytes if file_bytes is not None else getattr(payload, "file_bytes", None)
+    expected_doc = _normalize_doc_type_hint(payload.document_type)
 
-    try:
-        from app.documents.validator import FourStageDocumentValidator
-    except Exception:
-        pass
+    if raw_bytes:
+        effective_constraints = dict(portal_constraints or {})
+        if payload.required_format and "allowed_mime_types" not in effective_constraints:
+            effective_constraints["allowed_mime_types"] = [payload.required_format]
 
-    if is_vault:
-        parts = ref.split(".")
-        if len(parts) >= 3:
-            checks.extend(["profile_scope_valid", "doc_type_valid", "field_key_valid", "not_expired", "checksum_valid"])
-        else:
-            errors.append("Invalid vault reference structure.")
-    elif len(ref) > 4:
-        checks.extend(["not_expired", "checksum_valid"])
-    else:
-        errors.append("Invalid document identifier format.")
+        extraction = run_document_extraction_tool(
+            file_bytes=raw_bytes,
+            mime_type=mime_type,
+            expected_doc_type=expected_doc,
+            profile_id=profile_id,
+            profile_full_name=profile_full_name,
+            language=language,
+            portal_constraints=effective_constraints or None,
+        )
+        v = extraction.validation
+        stage_map = {
+            "technical_specs": v.stage_1_technical_specs,
+            "visual_quality": v.stage_2_visual_quality,
+            "document_classification": v.stage_3_document_classification,
+            "cross_field_consistency": v.stage_4_cross_field_consistency,
+        }
+        checks_passed = [name for name, stage in stage_map.items() if stage.passed]
+        if v.auto_formatted_applied:
+            checks_passed.append("auto_formatted_for_portal")
+        errors = [err for stage in stage_map.values() for err in stage.errors]
+        return ValidateDocumentOutput(
+            is_valid=v.overall_passed,
+            format_valid=v.stage_1_technical_specs.passed,
+            checks_passed=checks_passed,
+            errors=errors,
+        )
 
-    is_valid = len(errors) == 0
+    ref = (payload.vault_token_or_ref or "").strip()
+    token_valid = bool(_VAULT_TOKEN_RE.match(ref))
+    if not token_valid:
+        return ValidateDocumentOutput(
+            is_valid=False,
+            format_valid=False,
+            checks_passed=[],
+            errors=[
+                f"Invalid vault reference token '{ref}'. Expected vault:<profileId>.<docType>.<fieldKey> or raw file_bytes."
+            ],
+        )
+
     return ValidateDocumentOutput(
-        is_valid=is_valid,
-        format_valid=is_valid,
-        checks_passed=checks if is_valid else ["vault_token_format_valid", "not_expired", "checksum_valid"],
-        errors=errors
+        is_valid=True,
+        format_valid=True,
+        checks_passed=["vault_token_format_valid"],
+        errors=[],
     )
 
 
@@ -349,166 +419,152 @@ async def map_form_fields_tool(payload: MapFormFieldsInput) -> MapFormFieldsOutp
     unmapped: list[str] = []
     sensitive_count = 0
     slug = payload.profile_slug or "self"
-    memories = {k.lower(): v for k, v in payload.available_memories.items()}
+    memories = {k.strip().lower(): v for k, v in payload.available_memories.items() if v is not None and str(v).strip()}
 
-    mapped_keys: set[str] = set()
+    form_targets = [
+        {
+            "element_key": f.element_key,
+            "label": (f.label or f.name or f.placeholder or f.id or f.element_key),
+            "input_type": f.input_type or "text",
+            "required": bool(f.is_required),
+        }
+        for f in payload.fields
+    ]
 
-    # 1. Connect to Madhav's field_mapper module
-    try:
-        from app.documents.field_mapper import map_document_fields_to_form
-
-        raw_form_fields = [
-            {
-                "element_id": f.element_key,
-                "name": f.name or f.element_key,
-                "label": f.label or f.placeholder or f.name or f.element_key,
-                "placeholder": f.placeholder or "",
-                "selector": f.selector,
-                "field_type": getattr(f, "input_type", "text"),
-                "required": f.is_required,
-            }
-            for f in payload.fields
-        ]
-
-        standard_keys = [
-            "pan_number", "id_number", "aadhaar_number", "account_number",
-            "ifsc_code", "dob", "full_name", "annual_income"
-        ]
-        available_keys = list(set(list(memories.keys()) + standard_keys))
-
-        mapper_res = map_document_fields_to_form(
+    # Delegate document-backed field matching to run_map_form_fields_tool (field_mapper.py).
+    vault_specs: list[tuple[str, list[str], bool]] = [
+        ("pan", ["pan_number"], True),
+        ("aadhaar", ["id_number"], True),
+        ("bank_passbook", ["account_number", "ifsc_code"], True),
+        ("marksheet", ["roll_number"], False),
+        ("income_certificate", ["annual_income"], False),
+    ]
+    label_by_element = {
+        f.element_key: (f.label or f.name or f.placeholder or f.id or "").lower()
+        for f in payload.fields
+    }
+    key_required_cues: dict[str, tuple[str, ...]] = {
+        "pan_number": ("pan", "permanent account"),
+        "aadhaar_number": ("aadhaar", "aadhar", "uid", "id number"),
+        "account_number": ("account", "a/c", "acct", "khata"),
+        "ifsc_code": ("ifsc", "ifs"),
+        "roll_number": ("roll", "enrollment", "seat", "registration"),
+        "annual_income": ("income", "aay", "salary"),
+    }
+    best_vault_by_element: dict[str, tuple[str, str, float, bool]] = {}
+    for doc_type, field_keys, default_sensitive in vault_specs:
+        mapped_resp = run_map_form_fields_tool(
             profile_id=slug,
-            doc_type="all",
-            available_field_keys=available_keys,
-            form_fields=raw_form_fields
+            doc_type=doc_type,
+            available_field_keys=field_keys,
+            form_fields=form_targets,
         )
-
-        field_by_key = {f.element_key: f for f in payload.fields}
-        for mf in mapper_res.get("mapped_fields", []):
-            el_key = mf.get("form_field_id")
-            orig_field = field_by_key.get(el_key)
-            if not orig_field:
+        for item in mapped_resp.mappings:
+            token = _standardize_vault_token(item.source_ref)
+            matched_key = token.rsplit(".", 1)[-1]
+            cues = key_required_cues.get(matched_key)
+            el_label = label_by_element.get(item.element_key, "")
+            if cues and not any(cue in el_label for cue in cues):
                 continue
-
-            matched_fact = mf.get("matched_field_key")
-            vault_tok = mf.get("vault_token")
-            conf = mf.get("confidence", 0.9)
-
-            is_sens = False
-            final_val = vault_tok
-            if vault_tok and vault_tok.startswith("vault:"):
-                is_sens = True
-                sensitive_count += 1
-            elif matched_fact and matched_fact in memories:
-                final_val = memories[matched_fact]
-
-            mappings.append(
-                FieldMapping(
-                    element_key=orig_field.element_key,
-                    field_label=orig_field.label or orig_field.name or orig_field.element_key,
-                    selector=orig_field.selector,
-                    matched_fact_key=matched_fact,
-                    value_or_vault_ref=final_val,
-                    is_sensitive=is_sens,
-                    confidence=conf,
-                    field_type=orig_field.input_type,
+            is_sensitive = default_sensitive and matched_key != "ifsc_code"
+            existing = best_vault_by_element.get(item.element_key)
+            if existing is None or item.confidence > existing[2]:
+                best_vault_by_element[item.element_key] = (
+                    token,
+                    matched_key,
+                    item.confidence,
+                    is_sensitive,
                 )
-            )
-            mapped_keys.add(el_key)
 
-        for u in mapper_res.get("unmapped_required", []):
-            unmapped.append(str(u))
-    except Exception as exc:
-        mapped_keys = set()
-
-    # 2. Complete with built-in heuristic mapping for any remaining unmapped fields
     for f in payload.fields:
-        if f.element_key in mapped_keys:
-            continue
-
         label = (f.label or f.name or f.placeholder or f.id or "").lower()
-        val_or_ref = None
-        matched_key = None
+        val_or_ref: str | None = None
+        matched_key: str | None = None
         is_sensitive = False
+        confidence = 1.0
 
-        # Check for PAN
-        if "pan" in label:
-            val_or_ref = f"vault:{slug}.pan.id_number"
-            matched_key = "pan_number"
+        vault_match = best_vault_by_element.get(f.element_key)
+        # Prefer explicit memory value for IFSC when available; otherwise use vault token.
+        if vault_match and vault_match[1] == "ifsc_code":
+            mem_ifsc = memories.get("ifsc") or memories.get("ifsc_code")
+            if mem_ifsc:
+                val_or_ref = mem_ifsc
+                matched_key = "ifsc_code"
+            else:
+                val_or_ref, matched_key, confidence, is_sensitive = vault_match
+        elif vault_match and not ("bank" in label and "name" in label):
+            val_or_ref, matched_key, confidence, is_sensitive = vault_match
+            if is_sensitive:
+                sensitive_count += 1
+        elif "khata" in label:
+            val_or_ref = f"vault:{slug}.bank_passbook.account_number"
+            matched_key = "account_number"
             is_sensitive = True
             sensitive_count += 1
-        # Check for Aadhaar
-        elif "aadhaar" in label or "aadhar" in label or "uid" in label:
-            val_or_ref = f"vault:{slug}.aadhaar.id_number"
-            matched_key = "aadhaar_number"
-            is_sensitive = True
-            sensitive_count += 1
-        # Check for Bank Account
-        elif "account" in label or "khata" in label:
-            val_or_ref = f"vault:{slug}.bank.account_number"
-            matched_key = "bank_account"
-            is_sensitive = True
-            sensitive_count += 1
-        # Check for IFSC
         elif "ifsc" in label:
-            val_or_ref = memories.get("ifsc") or memories.get("ifsc_code") or "SBIN0001234"
+            val_or_ref = memories.get("ifsc") or memories.get("ifsc_code")
             matched_key = "ifsc_code"
-        # Check for Name
-        elif "name" in label or "naam" in label:
-            val_or_ref = memories.get("full_name") or memories.get("name") or "Ayush Kumar"
-            matched_key = "full_name"
-        # Check for DOB
-        elif "dob" in label or "birth" in label or "janm" in label:
-            val_or_ref = memories.get("dob") or memories.get("date_of_birth") or "2002-05-14"
-            matched_key = "dob"
-        # Check for Gender
-        elif "gender" in label or "ling" in label:
-            val_or_ref = memories.get("gender") or "Male"
-            matched_key = "gender"
-        # Check for Mobile
-        elif "mobile" in label or "phone" in label or "contact" in label:
-            val_or_ref = memories.get("mobile_no") or memories.get("phone") or "9876543210"
-            matched_key = "mobile_no"
-        # Check for Address
-        elif "address" in label or "pata" in label:
-            val_or_ref = memories.get("address") or "124 Tech Park Road, HSR Layout"
-            matched_key = "address"
-        # Check for State / Domicile
-        elif "state" in label or "domicile" in label or "rajya" in label:
-            val_or_ref = memories.get("domicile_state") or memories.get("state") or "Karnataka"
-            matched_key = "state"
-        # Check for Pincode
-        elif "pin" in label or "postal" in label:
-            val_or_ref = memories.get("pincode") or "560102"
-            matched_key = "pincode"
-        # Check for Bank Name
         elif "bank" in label and "name" in label:
-            val_or_ref = memories.get("bank_name") or "State Bank of India"
+            val_or_ref = memories.get("bank_name")
             matched_key = "bank_name"
-        # Fallback to current value or generic memory
+        elif "father" in label or "mother" in label or "guardian" in label:
+            if "father" in label:
+                val_or_ref = memories.get("father_name")
+                matched_key = "father_name"
+            elif "mother" in label:
+                val_or_ref = memories.get("mother_name")
+                matched_key = "mother_name"
+            else:
+                val_or_ref = memories.get("guardian_name")
+                matched_key = "guardian_name"
+        elif "name" in label or "naam" in label:
+            val_or_ref = memories.get("full_name") or memories.get("name")
+            matched_key = "full_name"
+        elif "dob" in label or "birth" in label or "janm" in label:
+            val_or_ref = memories.get("dob") or memories.get("date_of_birth")
+            matched_key = "dob"
+        elif "gender" in label or "ling" in label:
+            val_or_ref = memories.get("gender")
+            matched_key = "gender"
+        elif "mobile" in label or "phone" in label or "contact" in label:
+            val_or_ref = memories.get("mobile_no") or memories.get("phone")
+            matched_key = "mobile_no"
+        elif "email" in label:
+            val_or_ref = memories.get("email")
+            matched_key = "email"
+        elif "address" in label or "pata" in label:
+            val_or_ref = memories.get("address")
+            matched_key = "address"
+        elif "state" in label or "domicile" in label or "rajya" in label:
+            val_or_ref = memories.get("domicile_state") or memories.get("state")
+            matched_key = "state"
+        elif "pin" in label or "postal" in label:
+            val_or_ref = memories.get("pincode")
+            matched_key = "pincode"
         else:
-            val_or_ref = f.current_value
+            val_or_ref = f.current_value or None
 
         if val_or_ref:
-            mappings.append(FieldMapping(
-                element_key=f.element_key,
-                field_label=f.label or f.name or f.element_key,
-                selector=f.selector,
-                matched_fact_key=matched_key,
-                value_or_vault_ref=val_or_ref,
-                is_sensitive=is_sensitive,
-                confidence=1.0,
-                field_type=f.input_type
-            ))
+            mappings.append(
+                FieldMapping(
+                    element_key=f.element_key,
+                    field_label=f.label or f.name or f.element_key,
+                    selector=f.selector,
+                    matched_fact_key=matched_key,
+                    value_or_vault_ref=val_or_ref,
+                    is_sensitive=is_sensitive,
+                    confidence=confidence,
+                    field_type=f.input_type,
+                )
+            )
         elif f.is_required:
             unmapped.append(f.label or f.element_key)
 
     return MapFormFieldsOutput(
         mappings=mappings,
         unmapped_required_fields=unmapped,
-        sensitive_fields_count=sensitive_count
+        sensitive_fields_count=sensitive_count,
     )
-
 
 
 # 10. fill_form_fields
@@ -630,19 +686,33 @@ async def show_visual_guide_tool(payload: ShowVisualGuideInput) -> ShowVisualGui
 # 16. capture_receipt
 async def capture_receipt_tool(payload: CaptureReceiptInput) -> CaptureReceiptOutput:
     snapshot = payload.dom_snapshot
-    text = (snapshot.text_content_snippet or "")
+    parts = [snapshot.text_content_snippet or "", payload.receipt_selector_or_text or ""]
     for f in snapshot.fields:
         if f.current_value:
-            text += f" {f.current_value}"
+            parts.append(f.current_value)
+    text = " ".join(p for p in parts if p)
 
-    # Search for pattern like APP-2026-XXXXX or alphanumeric reference numbers
-    ref_match = re.search(r"\b(APP-\d{4}-\d{4,6}|ACK-\d{6,10}|[A-Z0-9]{8,15})\b", text)
-    receipt_no = ref_match.group(1) if ref_match else "APP-2026-88412"
+    # Verify an explicit structured acknowledgement/receipt reference pattern (never fabricate one).
+    ref_match = re.search(
+        r"\b(?:APP-\d{4}-\d{4,6}|ACK-\d{4,10}|REF-\d{4,10}|"
+        r"(?:receipt|reference|application|acknowledgement)\s*(?:no\.?|number|id)?\s*[:#-]?\s*([A-Z0-9-]*\d[A-Z0-9-]{4,19}))\b",
+        text,
+        re.IGNORECASE,
+    )
+    if not ref_match:
+        return CaptureReceiptOutput(
+            receipt_number=None,
+            submission_timestamp=None,
+            status="unconfirmed",
+            captured_data={"portal_url": snapshot.url},
+            is_success=False,
+        )
 
+    receipt_no = ref_match.group(1) or ref_match.group(0)
     return CaptureReceiptOutput(
-        receipt_number=receipt_no,
-        submission_timestamp="2026-11-25T22:50:00Z",
+        receipt_number=receipt_no.upper(),
+        submission_timestamp=datetime.now(timezone.utc).isoformat(),
         status="acknowledged",
-        captured_data={"application_ref_no": receipt_no, "portal_url": snapshot.url},
-        is_success=True
+        captured_data={"application_ref_no": receipt_no.upper(), "portal_url": snapshot.url},
+        is_success=True,
     )

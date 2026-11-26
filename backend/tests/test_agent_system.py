@@ -13,21 +13,28 @@ Verifies:
 
 import pytest
 import asyncio
+import sys
 import uuid
+from pathlib import Path
 from httpx import AsyncClient, ASGITransport
 
+_BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR))
+
 from app.main import app
-from app.database import get_db, AsyncSessionLocal
-from app.models import User, FamilyProfile, AgentMemory, ApprovedPortal, Task
-from app.agent.discovery import check_domain_shield, discover_or_narrow_portal
+from app.database import AsyncSessionLocal, engine
+from app.models import ApprovedPortal
+from app.api.db_routes import TaskState, create_hs256_jwt
+from app.agent.discovery import check_domain_shield
 from app.agent.visual_guides import get_visual_guide_card, is_visual_guide_query
 from app.agent.tool_registry import sanitize_sensitive_data
-from app.schemas.agent_contracts import (
-    DOMSnapshot,
-    DOMField,
-    DOMButton,
-    AgentChatRequest,
-)
+
+
+@pytest.fixture(autouse=True)
+async def _dispose_engine_between_tests():
+    yield
+    await engine.dispose()
 
 
 @pytest.mark.anyio
@@ -120,6 +127,20 @@ async def test_orchestration_end_to_end():
         user_data = auth_resp.json()
         user_id = user_data["user_id"]
         profile_id = user_data["profiles"][0]["id"]
+        auth_headers = {"Authorization": f"Bearer {create_hs256_jwt(user_id)}"}
+
+        # Seed non-sensitive profile memory for full_name (replaces removed hardcoded stub)
+        mem_resp = await client.put(
+            f"/api/v1/users/{user_id}/memory",
+            json={
+                "profile_id": profile_id,
+                "category": "personal",
+                "fact_key": "full_name",
+                "fact_value": "Ayush Kumar",
+            },
+            headers=auth_headers,
+        )
+        assert mem_resp.status_code == 200
 
         # 2. Mid-Form Visual Guide Q&A (Non-Destructive Lane)
         qa_resp = await client.post("/api/v1/agent/chat", json={
@@ -127,7 +148,7 @@ async def test_orchestration_end_to_end():
             "profile_id": profile_id,
             "message": "Where is my account number on the passbook?",
             "language": "en"
-        })
+        }, headers=auth_headers)
         assert qa_resp.status_code == 200
         qa_data = qa_resp.json()
         assert qa_data["response_type"] == "visual_guide"
@@ -155,7 +176,7 @@ async def test_orchestration_end_to_end():
             "message": "Fill personal details",
             "current_url": "http://localhost:8000/demo-form.html",
             "dom_snapshot": dom_step1
-        })
+        }, headers=auth_headers)
         assert step1_resp.status_code == 200
         step1_data = step1_resp.json()
         assert step1_data["response_type"] == "action"
@@ -165,16 +186,16 @@ async def test_orchestration_end_to_end():
         # Verify Zero-Leak: Sensitive fields received vault tokens
         pan_action = next(a for a in actions if a["element_key"] == "field_02")
         assert pan_action["value_or_vault_ref"].startswith("vault:")
-        assert "pan.id_number" in pan_action["value_or_vault_ref"]
+        assert "pan.pan_number" in pan_action["value_or_vault_ref"]
         assert pan_action["is_sensitive"] is True
 
         task_id = step1_data["task_id"]
 
-        # 4. Safe-Pause & Resume: Verify task is resumable
-        resumable_resp = await client.get(f"/api/v1/agent/tasks/{user_id}/resumable")
+        # 4. Safe-Pause & Resume: Verify task is listed under GET /api/v1/tasks
+        resumable_resp = await client.get(f"/api/v1/tasks?user_id={user_id}", headers=auth_headers)
         assert resumable_resp.status_code == 200
         resumable_data = resumable_resp.json()
-        assert resumable_data["count"] >= 1
+        assert len(resumable_data["tasks"]) >= 1
 
         # 5. Human-in-the-Loop Gate on Final Step (Step 4 Review & Submit)
         dom_step4 = {
@@ -199,14 +220,49 @@ async def test_orchestration_end_to_end():
             "message": "Ready to submit",
             "current_url": "http://localhost:8000/demo-form.html",
             "dom_snapshot": dom_step4
-        })
+        }, headers=auth_headers)
         assert step4_resp.status_code == 200
         step4_data = step4_resp.json()
         assert step4_data["response_type"] == "approval_request"
+        assert step4_data["status"] == TaskState.AWAITING_SUBMIT_APPROVAL.value
         assert len(step4_data["client_actions"]) == 0, "Human-in-the-loop gate must NEVER emit click action on final submit!"
         assert step4_data["approval_request"]["approval_required"] is True
 
-        # 6. Post-Submit Acknowledgement Receipt Capture
+        # Record action-bound cryptographic approval -> transitions to SUBMITTING
+        task_resp = await client.get(f"/api/v1/tasks/{task_id}", headers=auth_headers)
+        assert task_resp.status_code == 200
+        pending_action_hash = task_resp.json()["pending_action_hash"]
+        assert pending_action_hash
+
+        approval_resp = await client.post(
+            f"/api/v1/tasks/{task_id}/approval",
+            json={"action_hash": pending_action_hash, "approved": True},
+            headers=auth_headers,
+        )
+        assert approval_resp.status_code == 200
+        approval_data = approval_resp.json()
+        assert approval_data["approved"] is True
+        assert approval_data["status"] == TaskState.SUBMITTING.value
+        assert approval_data["action_hash"] == pending_action_hash
+
+        # 6. Verified Submit Dispatch: agent emits CLICK_BUTTON while task stays in SUBMITTING
+        submit_click_resp = await client.post("/api/v1/agent/chat", json={
+            "user_id": user_id,
+            "profile_id": profile_id,
+            "task_id": task_id,
+            "message": "Proceed with approved submission",
+            "current_url": "http://localhost:8000/demo-form.html",
+            "dom_snapshot": dom_step4
+        }, headers=auth_headers)
+        assert submit_click_resp.status_code == 200
+        submit_click_data = submit_click_resp.json()
+        assert submit_click_data["response_type"] == "action"
+        assert submit_click_data["status"] == TaskState.SUBMITTING.value
+        assert len(submit_click_data["client_actions"]) == 1
+        assert submit_click_data["client_actions"][0]["action_type"] == "CLICK_BUTTON"
+        assert submit_click_data["client_actions"][0]["selector"] == "#btn-final-submit"
+
+        # 7. Post-Submit Acknowledgement Receipt Capture -> SUBMITTING transitions to SUBMITTED
         dom_receipt = {
             "url": "http://localhost:8000/demo-form.html",
             "title": "National Scholarship Portal",
@@ -225,12 +281,12 @@ async def test_orchestration_end_to_end():
             "message": "Extract receipt",
             "current_url": "http://localhost:8000/demo-form.html",
             "dom_snapshot": dom_receipt
-        })
+        }, headers=auth_headers)
         assert receipt_resp.status_code == 200
         receipt_data = receipt_resp.json()
         assert receipt_data["response_type"] == "completed"
         assert receipt_data["receipt_data"]["receipt_number"] == "APP-2026-88412"
-        assert receipt_data["status"] == "completed"
+        assert receipt_data["status"] == TaskState.SUBMITTED.value
 
         print("✓ End-to-End Orchestration cycle passed successfully!")
 

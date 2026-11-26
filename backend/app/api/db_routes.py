@@ -4,7 +4,6 @@ import base64
 import hashlib
 import hmac
 import json
-import os
 import time
 import uuid
 from enum import Enum
@@ -17,7 +16,8 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db, settings
+from app.core.config import get_settings
+from app.database import get_db
 from app.models import (
     AgentMemory,
     ApprovedPortal,
@@ -178,19 +178,23 @@ ALLOWED_STATE_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
 
 
 def _get_jwt_secret() -> str:
-    return getattr(settings, "secret_key", None) or os.getenv(
-        "JWT_SECRET_KEY", "dev-local-secret-change-in-prod"
-    )
+    app_settings = get_settings()
+    if app_settings.jwt_secret_key is not None:
+        secret = app_settings.jwt_secret_key.get_secret_value().strip()
+        if secret:
+            return secret
+    return "local-dev-jwt-secret-key-at-least-32-bytes-long-2026"
 
 
 def _is_production_env() -> bool:
-    return os.getenv("ENV", "development").strip().lower() == "production"
+    app_settings = get_settings()
+    return bool(app_settings.is_production)
 
 
 def _allow_dev_user_header() -> bool:
     if _is_production_env():
         return False
-    return os.getenv("ALLOW_DEV_USER_HEADER", "true").strip().lower() == "true"
+    return bool(get_settings().allow_dev_user_header)
 
 
 def _b64url_encode(raw: bytes) -> str:
@@ -203,7 +207,7 @@ def _b64url_decode(data: str) -> bytes:
 
 
 def create_hs256_jwt(user_id: str, expires_in_seconds: int = 3600) -> str:
-    """Issue a signed HS256 JWT containing sub and user_id claims."""
+    """Issue a signed HS256 JWT containing sub, user_id, iat, and exp claims."""
     now = int(time.time())
     header = {"alg": "HS256", "typ": "JWT"}
     payload = {
@@ -225,7 +229,7 @@ def create_hs256_jwt(user_id: str, expires_in_seconds: int = 3600) -> str:
 
 
 def _verify_hs256_jwt(authorization: str) -> str:
-    """Verify Bearer HS256 JWT signature and expiry; raise 401 on any failure."""
+    """Verify Bearer HS256 JWT signature and mandatory exp claim; raise 401 on any failure."""
     parts = authorization.strip().split(" ", 1)
     if len(parts) != 2 or parts[0].lower() != "bearer":
         raise HTTPException(
@@ -302,13 +306,11 @@ def _verify_hs256_jwt(authorization: str) -> str:
     return str(subject).strip()
 
 
-def verify_caller_ownership(
-    requested_user_id: str | uuid.UUID,
-    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
-    authorization: Optional[str] = Header(default=None, alias="Authorization"),
-) -> None:
-    """Fail-closed caller ownership check using signed HS256 JWT or local dev X-User-Id."""
-    target_id = str(requested_user_id).strip()
+def _extract_caller_id(
+    x_user_id: Optional[str] = None,
+    authorization: Optional[str] = None,
+) -> str:
+    """Authenticate caller via signed HS256 JWT (or local dev X-User-Id); fail closed with 401."""
     caller_id: Optional[str] = None
 
     if authorization and authorization.strip():
@@ -321,6 +323,18 @@ def verify_caller_ownership(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required: provide Authorization Bearer JWT.",
         )
+
+    return caller_id
+
+
+def verify_caller_ownership(
+    requested_user_id: str | uuid.UUID,
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    authorization: Optional[str] = Header(default=None, alias="Authorization"),
+) -> None:
+    """Fail-closed caller ownership check using signed HS256 JWT or local dev X-User-Id."""
+    target_id = str(requested_user_id).strip()
+    caller_id = _extract_caller_id(x_user_id=x_user_id, authorization=authorization)
 
     if caller_id != target_id:
         raise HTTPException(
@@ -567,7 +581,23 @@ async def verify_domain(
         raise HTTPException(status_code=422, detail="Query parameter 'domain' or 'url' is required.")
 
     canonical_domain = _extract_canonical_hostname(raw_target)
-    if not canonical_domain or "." not in canonical_domain:
+    if not canonical_domain:
+        return {
+            "is_official": False,
+            "canonical_domain": canonical_domain,
+            "support_tier": "blocked",
+            "reason": "Invalid or unparseable domain/URL.",
+        }
+
+    if canonical_domain in ("localhost", "127.0.0.1") and not get_settings().is_production:
+        return {
+            "is_official": True,
+            "canonical_domain": canonical_domain,
+            "support_tier": "local_demo",
+            "reason": f"Local development host '{canonical_domain}' allowed in non-production environment.",
+        }
+
+    if "." not in canonical_domain:
         return {
             "is_official": False,
             "canonical_domain": canonical_domain,
@@ -690,11 +720,16 @@ async def get_task(
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
     authorization: Optional[str] = Header(default=None, alias="Authorization"),
 ):
+    caller_id = _extract_caller_id(x_user_id=x_user_id, authorization=authorization)
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    verify_caller_ownership(str(task.user_id), x_user_id=x_user_id, authorization=authorization)
+    if caller_id != str(task.user_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: caller identity does not match requested user_id.",
+        )
 
     pending_action_hash: Optional[str] = None
     if task.status in (
@@ -741,11 +776,16 @@ async def get_task_history(
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
     authorization: Optional[str] = Header(default=None, alias="Authorization"),
 ):
+    caller_id = _extract_caller_id(x_user_id=x_user_id, authorization=authorization)
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    verify_caller_ownership(str(task.user_id), x_user_id=x_user_id, authorization=authorization)
+    if caller_id != str(task.user_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: caller identity does not match requested user_id.",
+        )
 
     stmt = (
         select(ToolAuditLog)
@@ -778,11 +818,16 @@ async def save_task_checkpoint(
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
     authorization: Optional[str] = Header(default=None, alias="Authorization"),
 ):
+    caller_id = _extract_caller_id(x_user_id=x_user_id, authorization=authorization)
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    verify_caller_ownership(str(task.user_id), x_user_id=x_user_id, authorization=authorization)
+    if caller_id != str(task.user_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: caller identity does not match requested user_id.",
+        )
 
     if payload.status is not None:
         try:
@@ -791,7 +836,10 @@ async def save_task_checkpoint(
             current_state = None
 
         if current_state is not None:
-            if payload.status in (TaskState.SUBMITTING, TaskState.SUBMITTED) and payload.status != current_state:
+            if (
+                payload.status in (TaskState.SUBMITTING, TaskState.SUBMITTED)
+                and payload.status != current_state
+            ):
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=(
@@ -851,11 +899,16 @@ async def approve_task_submission(
     authorization: Optional[str] = Header(default=None, alias="Authorization"),
 ):
     """Action-bound human-in-the-loop approval gate before final portal submission (PRD FR-027)."""
+    caller_id = _extract_caller_id(x_user_id=x_user_id, authorization=authorization)
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
 
-    verify_caller_ownership(str(task.user_id), x_user_id=x_user_id, authorization=authorization)
+    if caller_id != str(task.user_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: caller identity does not match requested user_id.",
+        )
 
     if task.status not in (
         TaskState.AWAITING_APPROVAL.value,
@@ -873,7 +926,7 @@ async def approve_task_submission(
             detail="Action hash mismatch: pending task state changed after approval prompt (FR-027).",
         )
 
-    next_state = TaskState.SUBMITTED if payload.approved else TaskState.CANCELLED
+    next_state = TaskState.SUBMITTING if payload.approved else TaskState.CANCELLED
     task.status = next_state.value
 
     sanitized_note = (

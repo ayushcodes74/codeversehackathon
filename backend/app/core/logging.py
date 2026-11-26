@@ -3,7 +3,7 @@
 import logging
 from contextvars import ContextVar
 
-from app.policies.log_redactor import install_log_redaction
+from app.policies.log_redactor import SensitiveDataLogFilter, install_log_redaction
 
 request_id_ctx: ContextVar[str] = ContextVar("request_id", default="-")
 
@@ -50,6 +50,15 @@ def configure_logging(log_level: str = "INFO") -> None:
 
     if not any(isinstance(f, RequestIdLogFilter) for f in root_logger.filters):
         root_logger.addFilter(req_filter)
-
     # Ensure existing PII redaction filter stays attached to root, FastAPI, and Uvicorn loggers.
     install_log_redaction()
+
+    # Attach RequestIdLogFilter and SensitiveDataLogFilter to root handlers so child
+    # loggers propagating to root always receive request_id and PII redaction.
+    request_filter = RequestIdLogFilter()
+    pii_filter = SensitiveDataLogFilter()
+    for handler in root_logger.handlers:
+        if not any(isinstance(f, RequestIdLogFilter) for f in handler.filters):
+            handler.addFilter(request_filter)
+        if not any(isinstance(f, SensitiveDataLogFilter) for f in handler.filters):
+            handler.addFilter(pii_filter)

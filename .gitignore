@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.py[cod]
+.env
+.pytest_cache/
+.vscode/
+node_modules/
+tests/
+backend/tests/
+
+# Android & Gradle Build Artifacts (Do NOT commit)
+.gradle/
+**/build/
+build/
+local.properties
+*.apk
+*.aab
+.idea/
+*.iml
+.cxx/
+

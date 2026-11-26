@@ -5,7 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -28,6 +28,8 @@ class AppSettings(BaseSettings):
 
     docs_enabled: bool = True
     include_error_details: bool = False
+    jwt_secret_key: SecretStr | None = None
+    allow_dev_user_header: bool = False
 
     cors_origins: str | list[str] = Field(
         default_factory=lambda: [
@@ -64,7 +66,7 @@ class AppSettings(BaseSettings):
             return "/api/v1"
         if not cleaned.startswith("/"):
             cleaned = f"/{cleaned}"
-        return cleaned.rstrip("/") or "/"
+        return cleaned.rstrip("/")
 
     @field_validator("cors_origins", mode="after")
     @classmethod
@@ -85,6 +87,11 @@ class AppSettings(BaseSettings):
     def is_development(self) -> bool:
         """Return True when running in local development mode."""
         return self.app_env == "development"
+
+    @property
+    def is_production(self) -> bool:
+        """Return True when running in production mode."""
+        return self.app_env == "production"
 
     @property
     def expose_error_details(self) -> bool:

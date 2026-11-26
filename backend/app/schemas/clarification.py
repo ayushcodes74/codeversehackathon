@@ -6,7 +6,7 @@ from enum import Enum
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app.api.db_routes import TaskState
+from app.core.task_state import TaskState
 from app.schemas.common import FormFieldTarget, normalize_non_empty_text
 
 
