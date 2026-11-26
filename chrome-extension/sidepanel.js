@@ -288,88 +288,213 @@ async function resetTaskState() {
   feed.appendChild(emptyHint);
 }
 
-function captureActiveTabDom() {
-  return new Promise((resolve) => {
-    if (!state.activeTabId) {
-      resolve(null);
-      return;
+const CONTENT_SCRIPT_FILES = ['src/content/dom_inspector.js', 'src/content/action_executor.js'];
+
+function isWebUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  const lower = url.trim().toLowerCase();
+  return lower.startsWith('http://') || lower.startsWith('https://');
+}
+
+/**
+ * Handles NAVIGATE actions directly in sidepanel.js via chrome.tabs API.
+ * Uses chrome.tabs.update if current tab is a valid web page, or chrome.tabs.create
+ * if the current tab is a chrome:// or restricted internal page.
+ */
+async function handleNavigateAction(action) {
+  const targetUrl = action.value_or_vault_ref || action.url || action.target_url;
+  if (!targetUrl) return;
+
+  await getActiveTabInfo();
+  const tabId = state.activeTabId;
+  const currentUrl = state.activeUrl || '';
+
+  const isRestrictedTab =
+    !currentUrl ||
+    currentUrl.startsWith('chrome://') ||
+    currentUrl.startsWith('chrome-extension://') ||
+    currentUrl.startsWith('edge://') ||
+    currentUrl.startsWith('about:') ||
+    currentUrl.startsWith('view-source:');
+
+  if (tabId && !isRestrictedTab) {
+    await chrome.tabs.update(tabId, { url: targetUrl });
+  } else {
+    const newTab = await chrome.tabs.create({ url: targetUrl, active: true });
+    state.activeTabId = newTab.id;
+  }
+
+  state.activeUrl = targetUrl;
+  try {
+    state.activeDomain = new URL(targetUrl).hostname;
+  } catch (_e) {
+    state.activeDomain = '';
+  }
+  await refreshDomainShield();
+}
+
+/**
+ * Safely sends a message to content scripts in the active tab.
+ * - Verifies active tab has a valid http/https URL.
+ * - Catches "Receiving end does not exist" and automatically injects content scripts.
+ * - Retries message dispatch once after injection.
+ */
+async function sendTabMessageWithRetry(tabId, message, options = {}) {
+  await getActiveTabInfo();
+  const effectiveTabId = tabId || state.activeTabId;
+
+  if (!effectiveTabId) {
+    if (!options.silent) {
+      showAlert(
+        state.lang === 'hi'
+          ? 'कोई सक्रिय ब्राउज़र टैब नहीं मिला। कृपया पोर्टल पृष्ठ खोलें।'
+          : 'No active browser tab found. Please open an official portal page.',
+        'warn'
+      );
     }
-    const trySend = () =>
-      chrome.tabs.sendMessage(state.activeTabId, { type: 'CAPTURE_DOM_SNAPSHOT' }, async (resp) => {
-        if (!chrome.runtime.lastError && resp && (resp.ok || resp.success)) {
-          resolve(resp.snapshot || null);
-          return;
+    return null;
+  }
+
+  const currentUrl = state.activeUrl || '';
+  if (!isWebUrl(currentUrl)) {
+    if (!options.silent) {
+      showAlert(
+        state.lang === 'hi'
+          ? 'कृपया किसी पोर्टल पृष्ठ (http/https) पर जाएं। सिस्टम/एक्सटेंशन पृष्ठों पर ऑटोमेशन उपलब्ध नहीं है।'
+          : 'Please open an official portal page (http/https). Content scripts cannot run on browser internal or extension tabs.',
+        'warn'
+      );
+    }
+    return null;
+  }
+
+  const sendMessageOnce = () =>
+    new Promise((resolve, reject) => {
+      chrome.tabs.sendMessage(effectiveTabId, message, (response) => {
+        const err = chrome.runtime.lastError;
+        if (err) {
+          reject(new Error(err.message));
+        } else {
+          resolve(response);
         }
-        // Fallback: dynamically inject content scripts once on already-open tabs and retry.
-        if (chrome.scripting && typeof chrome.scripting.executeScript === 'function') {
-          try {
-            await chrome.scripting.executeScript({
-              target: { tabId: state.activeTabId },
-              files: ['src/content/dom_inspector.js', 'src/content/action_executor.js'],
-            });
-            chrome.tabs.sendMessage(state.activeTabId, { type: 'CAPTURE_DOM_SNAPSHOT' }, (retryResp) => {
-              if (chrome.runtime.lastError || !retryResp || (!retryResp.ok && !retryResp.success)) {
-                resolve(null);
-                return;
-              }
-              resolve(retryResp.snapshot || null);
-            });
-            return;
-          } catch (_injectErr) {
-            resolve(null);
-            return;
-          }
-        }
-        resolve(null);
       });
-    trySend();
-  });
-}
-
-function captureActiveTabReceipt() {
-  return new Promise((resolve) => {
-    if (!state.activeTabId) {
-      resolve(null);
-      return;
-    }
-    chrome.tabs.sendMessage(state.activeTabId, { type: 'CAPTURE_RECEIPT', action: 'CAPTURE_RECEIPT' }, (resp) => {
-      if (chrome.runtime.lastError || !resp || (!resp.ok && !resp.success)) {
-        resolve(null);
-        return;
-      }
-      resolve(resp.receipt || null);
     });
-  });
+
+  try {
+    return await sendMessageOnce();
+  } catch (err) {
+    const errMsg = (err && err.message) || String(err);
+    const isDisconnected =
+      errMsg.includes('Receiving end does not exist') ||
+      errMsg.includes('Could not establish connection');
+
+    if (isDisconnected && chrome.scripting && typeof chrome.scripting.executeScript === 'function') {
+      try {
+        console.warn('[SidePanel] Content script not detected on tab', effectiveTabId, '- auto-injecting...');
+        await chrome.scripting.executeScript({
+          target: { tabId: effectiveTabId },
+          files: CONTENT_SCRIPT_FILES,
+        });
+        await new Promise((r) => setTimeout(r, 80));
+        return await sendMessageOnce();
+      } catch (injectErr) {
+        console.warn('[SidePanel] Script auto-injection failed:', injectErr);
+        if (!options.silent) {
+          showAlert(
+            state.lang === 'hi'
+              ? 'टैब से कनेक्शन स्थापित नहीं हो सका। कृपया पृष्ठ को रीफ़्रेश करें।'
+              : 'Could not connect to active portal tab. Please refresh the page.',
+            'warn'
+          );
+        }
+        return null;
+      }
+    }
+
+    if (!options.silent) {
+      console.warn('[SidePanel] sendTabMessage error:', errMsg);
+      showAlert(errMsg, 'warn');
+    }
+    return null;
+  }
 }
 
-function dispatchActionsToActiveTab(actions, taskId, actionHash) {
-  return new Promise((resolve, reject) => {
-    if (!state.activeTabId) {
-      reject(new Error('No active browser tab found.'));
-      return;
+async function captureActiveTabDom() {
+  const resp = await sendTabMessageWithRetry(state.activeTabId, {
+    type: 'CAPTURE_DOM_SNAPSHOT',
+    action: 'CAPTURE_DOM_SNAPSHOT',
+  }, { silent: true });
+  if (resp && (resp.ok || resp.success)) {
+    return resp.snapshot || null;
+  }
+  return null;
+}
+
+async function captureActiveTabReceipt() {
+  const resp = await sendTabMessageWithRetry(state.activeTabId, {
+    type: 'CAPTURE_RECEIPT',
+    action: 'CAPTURE_RECEIPT',
+  }, { silent: true });
+  if (resp && (resp.ok || resp.success)) {
+    return resp.receipt || null;
+  }
+  return null;
+}
+
+async function dispatchActionsToActiveTab(actions, taskId, actionHash) {
+  if (!Array.isArray(actions) || actions.length === 0) {
+    return { ok: true, success: true, results: [] };
+  }
+
+  // 1. Handle NAVIGATE actions directly in sidepanel.js without forwarding to content script
+  const navActions = actions.filter((a) => a && a.action_type === 'NAVIGATE');
+  const domActions = actions.filter((a) => a && a.action_type !== 'NAVIGATE');
+
+  const results = [];
+  for (const nav of navActions) {
+    try {
+      await handleNavigateAction(nav);
+      results.push({ action: nav, success: true });
+    } catch (navErr) {
+      results.push({
+        action: nav,
+        success: false,
+        error: navErr && navErr.message ? navErr.message : String(navErr),
+      });
     }
-    chrome.tabs.sendMessage(
-      state.activeTabId,
-      {
-        type: 'EXECUTE_APPROVED_ACTIONS',
-        action: 'EXECUTE_APPROVED_ACTIONS',
-        task_id: taskId,
-        action_hash: actionHash,
-        actions,
-      },
-      (resp) => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
-          return;
-        }
-        if (!resp || (!resp.ok && !resp.success)) {
-          reject(new Error((resp && resp.error) || 'Tab action execution failed.'));
-          return;
-        }
-        resolve(resp);
-      }
-    );
-  });
+  }
+
+  if (domActions.length === 0) {
+    return {
+      ok: results.every((r) => r.success),
+      success: results.every((r) => r.success),
+      results,
+    };
+  }
+
+  // 2. Dispatch remaining DOM actions to content script via safe helper
+  const resp = await sendTabMessageWithRetry(
+    state.activeTabId,
+    {
+      type: 'EXECUTE_APPROVED_ACTIONS',
+      action: 'EXECUTE_APPROVED_ACTIONS',
+      task_id: taskId,
+      action_hash: actionHash,
+      actions: domActions,
+    },
+    { silent: false }
+  );
+
+  if (!resp || (!resp.ok && !resp.success)) {
+    const errorMsg = (resp && resp.error) || 'Tab action execution failed or tab disconnected.';
+    throw new Error(errorMsg);
+  }
+
+  const combinedResults = [...results, ...(resp.results || [])];
+  return {
+    ...resp,
+    results: combinedResults,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -420,6 +545,9 @@ async function handleConnectDevLogin() {
   const apiBaseUrl = getApiBaseUrl();
   state.apiBaseUrl = apiBaseUrl;
 
+  // Clear any stored task_id and active task state whenever connecting/logging in
+  await resetTaskState();
+
   let userId = (el('userIdInput').value || '').trim();
   let profileId = state.profileId || '';
 
@@ -454,6 +582,7 @@ async function handleConnectDevLogin() {
 
   state.userId = loginRes.user_id || userId;
   state.profileId = profileId;
+  state.taskId = null;
   state.authenticated = true;
 
   const authBadge = el('authStatusBadge');
@@ -1072,6 +1201,35 @@ function hideActionBoundReview() {
   state.pendingApproval = null;
 }
 
+/**
+ * Safely dispatches AGENT_CHAT_STEP with auto-recovery from HTTP 403
+ * "caller identity does not match task owner" error.
+ */
+async function safeSendAgentChatStep(params) {
+  try {
+    const step = await sendBg('AGENT_CHAT_STEP', params);
+    if (step && step.task_id) {
+      state.taskId = step.task_id;
+      await savePersistedTaskId(step.task_id);
+    }
+    return step;
+  } catch (err) {
+    const errText = (err && err.message) || String(err);
+    if (errText.includes('caller identity does not match task owner')) {
+      console.warn('[SidePanel] Caller identity mismatch for task. Resetting stale task_id and retrying turn...');
+      await resetTaskState();
+      const retryParams = { ...params, task_id: null };
+      const retryStep = await sendBg('AGENT_CHAT_STEP', retryParams);
+      if (retryStep && retryStep.task_id) {
+        state.taskId = retryStep.task_id;
+        await savePersistedTaskId(retryStep.task_id);
+      }
+      return retryStep;
+    }
+    throw err;
+  }
+}
+
 async function submitApprovalDecision(approved) {
   const pending = state.pendingApproval;
   if (!pending || !pending.taskId || !pending.actionHash) {
@@ -1109,7 +1267,7 @@ async function submitApprovalDecision(approved) {
   // Re-run agent turn on current DOM so orchestrator emits verified CLICK_BUTTON for submit.
   await getActiveTabInfo();
   const domSnapshot = await captureActiveTabDom();
-  const nextStep = await sendBg('AGENT_CHAT_STEP', {
+  const nextStep = await safeSendAgentChatStep({
     apiBaseUrl: getApiBaseUrl(),
     user_id: state.userId,
     profile_id: state.profileId || undefined,
@@ -1144,6 +1302,17 @@ async function handleAgentResponse(step) {
 
   appendFeed('Assistant', step.message, step.message_hi);
   const actions = step.actions || step.client_actions || [];
+
+  // Handle any NAVIGATE actions directly in sidepanel.js without forwarding to content script
+  const navActions = actions.filter((a) => a && a.action_type === 'NAVIGATE');
+  for (const nav of navActions) {
+    try {
+      await handleNavigateAction(nav);
+    } catch (navErr) {
+      console.warn('[SidePanel] Direct navigation error:', navErr);
+    }
+  }
+
   renderExecutionPlan(state.currentStepIndex, state.totalSteps, state.taskStatus, actions);
   renderClarification(step);
 
@@ -1476,7 +1645,7 @@ async function runAgentTurn(messageOverride = null, { includeDom = true } = {}) 
   appendFeed('You', message, message);
   const domSnapshot = includeDom ? await captureActiveTabDom() : null;
 
-  const step = await sendBg('AGENT_CHAT_STEP', {
+  const step = await safeSendAgentChatStep({
     apiBaseUrl: getApiBaseUrl(),
     user_id: state.userId,
     profile_id: state.profileId || undefined,
@@ -1497,7 +1666,7 @@ async function verifySubmissionReceipt() {
   ]);
 
   if (state.taskId && state.userId && domSnapshot) {
-    const step = await sendBg('AGENT_CHAT_STEP', {
+    const step = await safeSendAgentChatStep({
       apiBaseUrl: getApiBaseUrl(),
       user_id: state.userId,
       profile_id: state.profileId || undefined,
