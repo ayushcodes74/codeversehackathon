@@ -139,6 +139,33 @@
     return null;
   }
 
+  function normalizeDateValueForHtmlInput(rawVal) {
+    const str = String(rawVal ?? '').trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+      return str;
+    }
+    const ymdSlash = str.match(/^(\d{4})[/\-.](\d{1,2})[/\-.](\d{1,2})$/);
+    if (ymdSlash) {
+      return `${ymdSlash[1]}-${ymdSlash[2].padStart(2, '0')}-${ymdSlash[3].padStart(2, '0')}`;
+    }
+    const dmy = str.match(/^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})$/);
+    if (dmy) {
+      return `${dmy[3]}-${dmy[2].padStart(2, '0')}-${dmy[1].padStart(2, '0')}`;
+    }
+    const monMap = {
+      jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
+      jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12',
+    };
+    const dMonY = str.match(/^(\d{1,2})[\s/\-]+([A-Za-z]{3,9})[\s/\-,]+(\d{4})$/);
+    if (dMonY) {
+      const m = monMap[dMonY[2].slice(0, 3).toLowerCase()];
+      if (m) {
+        return `${dMonY[3]}-${m}-${dMonY[1].padStart(2, '0')}`;
+      }
+    }
+    return str;
+  }
+
   /**
    * Dispatches React/Vue/Angular-compatible native value/checked updates and events.
    */
@@ -184,10 +211,11 @@
       }
     } else if (tag === 'input') {
       const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+      const finalVal = inputType === 'date' ? normalizeDateValueForHtmlInput(val) : String(val ?? '');
       if (descriptor && descriptor.set) {
-        descriptor.set.call(element, String(val ?? ''));
+        descriptor.set.call(element, finalVal);
       } else {
-        element.value = String(val ?? '');
+        element.value = finalVal;
       }
     } else {
       element.textContent = String(val ?? '');
@@ -270,7 +298,12 @@
         }
         actualForReport = state.checked;
       } else {
-        matched = String(state.value ?? '') === String(expectedRaw ?? '');
+        const isDateInput =
+          el.tagName && el.tagName.toLowerCase() === 'input' && (el.type || '').toLowerCase() === 'date';
+        const expectedNormalized = isDateInput
+          ? normalizeDateValueForHtmlInput(expectedRaw)
+          : String(expectedRaw ?? '');
+        matched = String(state.value ?? '') === expectedNormalized;
       }
 
       if (matched) {

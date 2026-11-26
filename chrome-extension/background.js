@@ -507,10 +507,7 @@ async function handlePreviewVaultFields(msg) {
     }
     try {
       const canonical = vault.standardizeVaultToken(rawToken);
-      const resolved = await vault.resolveVaultToken(canonical, {
-        passphrase,
-        allowUnverified: false,
-      });
+      const resolved = await resolveWithFallback(vault, rawToken, passphrase);
       if (resolved !== null && resolved !== undefined) {
         const preview = formatSafePreviewValue(canonical, resolved);
         previews[rawToken] = preview;
@@ -524,9 +521,78 @@ async function handlePreviewVaultFields(msg) {
   return { ok: true, previews, locked: false };
 }
 
+function normalizeDateIso(rawValue) {
+  const str = String(rawValue ?? '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
+    return str;
+  }
+  const ymd = str.match(/^(\d{4})[/\-.](\d{1,2})[/\-.](\d{1,2})$/);
+  if (ymd) {
+    return `${ymd[1]}-${ymd[2].padStart(2, '0')}-${ymd[3].padStart(2, '0')}`;
+  }
+  const dmy = str.match(/^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})$/);
+  if (dmy) {
+    return `${dmy[3]}-${dmy[2].padStart(2, '0')}-${dmy[1].padStart(2, '0')}`;
+  }
+  return str;
+}
+
+function buildVaultFallbackCandidates(canonicalToken) {
+  const candidates = [canonicalToken];
+  if (canonicalToken.endsWith('.dob')) {
+    candidates.push(canonicalToken.replace(/\.dob$/, '.date_of_birth'));
+    if (canonicalToken.includes('.aadhaar.')) {
+      candidates.push(canonicalToken.replace('.aadhaar.dob', '.pan.dob'));
+      candidates.push(canonicalToken.replace('.aadhaar.dob', '.pan.date_of_birth'));
+    } else if (canonicalToken.includes('.pan.')) {
+      candidates.push(canonicalToken.replace('.pan.dob', '.aadhaar.dob'));
+      candidates.push(canonicalToken.replace('.pan.dob', '.aadhaar.date_of_birth'));
+    }
+  } else if (canonicalToken.endsWith('.full_name')) {
+    candidates.push(canonicalToken.replace(/\.full_name$/, '.name'));
+    if (canonicalToken.includes('.aadhaar.')) {
+      candidates.push(canonicalToken.replace('.aadhaar.full_name', '.pan.full_name'));
+      candidates.push(canonicalToken.replace('.aadhaar.full_name', '.pan.name'));
+    } else if (canonicalToken.includes('.pan.')) {
+      candidates.push(canonicalToken.replace('.pan.full_name', '.aadhaar.full_name'));
+      candidates.push(canonicalToken.replace('.pan.full_name', '.aadhaar.name'));
+    }
+  }
+  return candidates;
+}
+
+async function resolveWithFallback(vault, rawToken, passphrase) {
+  const canonical = vault.standardizeVaultToken(rawToken);
+  const candidates = buildVaultFallbackCandidates(canonical);
+  let lastError = null;
+  for (const cand of candidates) {
+    try {
+      const val = await vault.resolveVaultToken(cand, {
+        passphrase,
+        allowUnverified: false,
+      });
+      if (val !== null && val !== undefined && String(val).length > 0) {
+        if (canonical.endsWith('.dob')) {
+          return normalizeDateIso(val);
+        }
+        return String(val);
+      }
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  if (lastError) {
+    throw lastError;
+  }
+  return null;
+}
+
 function isSensitivePreviewToken(token, flag) {
   if (flag) return true;
   const lower = String(token || '').toLowerCase();
+  if (lower.endsWith('.dob') || lower.endsWith('.full_name') || lower.endsWith('.ifsc_code')) {
+    return false;
+  }
   return lower.includes('pan') || lower.includes('aadhaar') || lower.includes('account_number');
 }
 
@@ -565,10 +631,7 @@ async function handlePreviewVaultActions(msg) {
       } else {
         try {
           const canonical = vault.standardizeVaultToken(ref);
-          const resolved = await vault.resolveVaultToken(canonical, {
-            passphrase,
-            allowUnverified: false,
-          });
+          const resolved = await resolveWithFallback(vault, ref, passphrase);
           if (resolved !== null && resolved !== undefined) {
             value = String(resolved);
             maskedValue = formatSafePreviewValue(canonical, resolved);
@@ -580,8 +643,8 @@ async function handlePreviewVaultActions(msg) {
         }
       }
     } else {
-      value = ref;
-      maskedValue = sensitive ? maskFieldValue(ref) : ref;
+      value = act.field_type === 'date' ? normalizeDateIso(ref) : ref;
+      maskedValue = sensitive ? maskFieldValue(value) : value;
     }
 
     items.push({
@@ -668,11 +731,8 @@ async function handleResolveVaultTokens(msg) {
       continue;
     }
     const canonical = vault.standardizeVaultToken(rawToken);
-    // Strict FR-037 enforcement: allowUnverified is always false.
-    const value = await vault.resolveVaultToken(canonical, {
-      passphrase,
-      allowUnverified: false,
-    });
+    // Strict FR-037 enforcement: allowUnverified is always false inside resolveWithFallback.
+    const value = await resolveWithFallback(vault, rawToken, passphrase);
     if (value === null || value === undefined) {
       throw new Error(`Verified field not found in CryptoVault for token '${canonical}'.`);
     }

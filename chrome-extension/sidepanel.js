@@ -836,23 +836,56 @@ function renderMappedPreviewRows(container, actions, summary, extraFilledEntries
   }
 }
 
+function enrichSummaryWithFilledFields(summary) {
+  if (!summary || typeof summary !== 'object') return summary;
+  const filledList = Object.values(state.filledFieldsSummary || {});
+  if (filledList.length === 0) return summary;
+
+  const normalize = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  const clone = Array.isArray(summary) ? [...summary] : { ...summary };
+  const target = clone.summary && typeof clone.summary === 'object' ? { ...clone.summary } : clone;
+
+  Object.keys(target).forEach((k) => {
+    if (String(target[k]).trim() === '[Pending]') {
+      const nk = normalize(k);
+      const match = filledList.find((e) => {
+        const nl = normalize(e.label);
+        return nl && (nk === nl || nk.includes(nl) || nl.includes(nk));
+      });
+      if (match && match.previewValue) {
+        target[k] = match.previewValue;
+      }
+    }
+  });
+
+  if (clone.summary && typeof clone.summary === 'object') {
+    clone.summary = target;
+    return clone;
+  }
+  return target;
+}
+
 function showActionBoundReview(approvalMeta) {
-  state.pendingApproval = approvalMeta;
+  const enrichedMeta = {
+    ...approvalMeta,
+    summary: enrichSummaryWithFilledFields(approvalMeta.summary),
+  };
+  state.pendingApproval = enrichedMeta;
 
   // Inline card
   el('actionBoundReviewCard').classList.remove('hidden');
-  el('inlineReviewDomain').textContent = approvalMeta.targetDomain || state.activeDomain || 'unknown';
-  el('inlineReviewHash').textContent = approvalMeta.actionHash || '';
-  renderMappedPreviewRows(el('inlineReviewFields'), approvalMeta.actions, approvalMeta.summary);
+  el('inlineReviewDomain').textContent = enrichedMeta.targetDomain || state.activeDomain || 'unknown';
+  el('inlineReviewHash').textContent = enrichedMeta.actionHash || '';
+  renderMappedPreviewRows(el('inlineReviewFields'), enrichedMeta.actions, enrichedMeta.summary);
 
   // Modal
-  el('approvalTargetDomain').textContent = approvalMeta.targetDomain || state.activeDomain || 'unknown';
-  el('approvalActionHash').textContent = approvalMeta.actionHash || '';
+  el('approvalTargetDomain').textContent = enrichedMeta.targetDomain || state.activeDomain || 'unknown';
+  el('approvalActionHash').textContent = enrichedMeta.actionHash || '';
   el('approvalModalSubtitle').textContent =
     state.lang === 'hi'
       ? 'अंतिम सबमिट से पहले कृपया सत्यापित डोमेन और pending_action_hash की पुष्टि करें (FR-027)।'
       : 'Verify target domain, mapped fields, and pending_action_hash before approving submission (FR-027).';
-  renderMappedPreviewRows(el('approvalMappedFields'), approvalMeta.actions, approvalMeta.summary);
+  renderMappedPreviewRows(el('approvalMappedFields'), enrichedMeta.actions, enrichedMeta.summary);
   el('approvalModalBackdrop').classList.add('open');
   el('reviewPendingBtn').classList.remove('hidden');
 }

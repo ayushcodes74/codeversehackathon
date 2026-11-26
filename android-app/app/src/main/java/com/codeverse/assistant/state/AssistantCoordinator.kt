@@ -6,6 +6,7 @@ import com.codeverse.assistant.accessibility.PortalAccessibilityService
 import com.codeverse.assistant.network.AgentChatRequest
 import com.codeverse.assistant.network.AgentStepResponse
 import com.codeverse.assistant.network.ApiClientProvider
+import com.codeverse.assistant.network.CaptureReceiptOutput
 import com.codeverse.assistant.network.ClientAction
 import com.codeverse.assistant.network.DOMSnapshot
 import com.codeverse.assistant.network.DevTokenRequest
@@ -13,6 +14,7 @@ import com.codeverse.assistant.network.DocumentExtractionResult
 import com.codeverse.assistant.network.GoogleAuthUpsertRequest
 import com.codeverse.assistant.network.PortalVerifyResponse
 import com.codeverse.assistant.network.TaskApprovalRequest
+import com.codeverse.assistant.network.VisualGuideCard
 import com.codeverse.assistant.security.AuthorizationGate
 import com.codeverse.assistant.vault.EncryptedVaultStore
 import com.codeverse.assistant.vault.VaultEntrySummary
@@ -25,8 +27,8 @@ import okhttp3.MultipartBody
 import okhttp3.RequestBody.Companion.toRequestBody
 
 enum class OverlayTab {
-    ASSIST,
-    VAULT_DOCS,
+    AUTOMATE,
+    DOCUMENTS,
     APPROVAL
 }
 
@@ -56,11 +58,17 @@ data class AssistantUiState(
     val pendingActionHash: String? = null,
     val approvalWarning: String? = null,
     val approvalSummary: Map<String, String> = emptyMap(),
+    val visualGuide: VisualGuideCard? = null,
+    val showGuideDialog: Boolean = false,
+    val receiptData: CaptureReceiptOutput? = null,
+    val fillCompleted: Boolean = false,
     val extractionResult: DocumentExtractionResult? = null,
     val editableFields: List<EditableExtractedField> = emptyList(),
+    val lastUploadedFileName: String? = null,
+    val vaultCommitSaved: Boolean = false,
     val vaultEntries: List<VaultEntrySummary> = emptyList(),
     val overlayExpanded: Boolean = false,
-    val activeOverlayTab: OverlayTab = OverlayTab.ASSIST,
+    val activeOverlayTab: OverlayTab = OverlayTab.AUTOMATE,
     val isBusy: Boolean = false,
     val statusLog: String = "",
     val errorMessage: String? = null
@@ -121,6 +129,14 @@ class AssistantCoordinator(
 
     fun selectOverlayTab(tab: OverlayTab) {
         _uiState.update { it.copy(activeOverlayTab = tab) }
+    }
+
+    fun setGuideDialogVisible(visible: Boolean) {
+        _uiState.update { it.copy(showGuideDialog = visible) }
+    }
+
+    fun dismissReceipt() {
+        _uiState.update { it.copy(receiptData = null, overlayExpanded = false) }
     }
 
     fun clearError() {
@@ -210,6 +226,7 @@ class AssistantCoordinator(
                 resolvedPortalUrl = resolvedUrl ?: it.resolvedPortalUrl,
                 portalVerification = verification,
                 isBusy = false,
+                fillCompleted = false,
                 statusLog = if (resolvedUrl != null) {
                     "Verified portal (${verification?.supportTier}): $resolvedUrl"
                 } else {
@@ -255,7 +272,7 @@ class AssistantCoordinator(
                 )
             )
 
-            _uiState.update { it.copy(lastSnapshot = snapshot, isBusy = false) }
+            _uiState.update { it.copy(lastSnapshot = snapshot, isBusy = false, fillCompleted = false) }
             applyAgentStep(step)
             step
         }.onFailure { err ->
@@ -288,7 +305,13 @@ class AssistantCoordinator(
         )
         val summary = "Field Fill: ${report.executedCount} filled, ${report.failedCount} failed.\n" +
             report.logs.joinToString("\n")
-        _uiState.update { it.copy(statusLog = summary, errorMessage = null) }
+        _uiState.update {
+            it.copy(
+                statusLog = summary,
+                fillCompleted = report.executedCount > 0 && report.failedCount == 0,
+                errorMessage = null
+            )
+        }
         summary
     }.onFailure { err ->
         _uiState.update { it.copy(errorMessage = err.message ?: "Field fill failed") }
@@ -336,7 +359,6 @@ class AssistantCoordinator(
                         clickSummary += " Submit click: ${report.executedCount} executed, ${report.failedCount} failed."
                     }
                 } else if (state.lastSnapshot != null) {
-                    // Re-consult agent so backend emits final CLICK_BUTTON now that approval is recorded
                     val nextStep = apiProvider.service().agentChat(
                         AgentChatRequest(
                             userId = state.userId!!,
@@ -391,7 +413,7 @@ class AssistantCoordinator(
         mimeType: String,
         expectedDocType: String
     ): Result<DocumentExtractionResult> = runCatching {
-        _uiState.update { it.copy(isBusy = true, errorMessage = null) }
+        _uiState.update { it.copy(isBusy = true, errorMessage = null, vaultCommitSaved = false) }
         val api = apiProvider.service()
 
         val mediaType = mimeType.toMediaTypeOrNull() ?: "application/octet-stream".toMediaTypeOrNull()
@@ -419,7 +441,7 @@ class AssistantCoordinator(
                 value = field.value,
                 confidence = field.confidence,
                 needsUserVerification = field.needsUserVerification,
-                verifiedByUser = false // FR-037: always require explicit user checkbox
+                verifiedByUser = false
             )
         }
 
@@ -428,7 +450,9 @@ class AssistantCoordinator(
                 isBusy = false,
                 extractionResult = result,
                 editableFields = editable,
-                activeOverlayTab = OverlayTab.VAULT_DOCS,
+                lastUploadedFileName = fileName,
+                vaultCommitSaved = false,
+                activeOverlayTab = OverlayTab.DOCUMENTS,
                 statusLog = "Extracted ${editable.size} fields (${result.detectedDocType}). Check verifiedByUser before saving."
             )
         }
@@ -451,7 +475,7 @@ class AssistantCoordinator(
                     item
                 }
             }
-            state.copy(editableFields = updated)
+            state.copy(editableFields = updated, vaultCommitSaved = false)
         }
     }
 
@@ -491,6 +515,7 @@ class AssistantCoordinator(
         _uiState.update {
             it.copy(
                 vaultEntries = summaries,
+                vaultCommitSaved = true,
                 statusLog = "Committed $count verified fields to Keystore Vault under vault:${state.profileSlug}.$docType.*",
                 errorMessage = null
             )
@@ -530,6 +555,8 @@ class AssistantCoordinator(
                 pendingActionHash = actionHash,
                 approvalWarning = step.approvalRequest?.warningMessage,
                 approvalSummary = summaryMap,
+                visualGuide = step.visualGuide ?: it.visualGuide,
+                receiptData = step.receiptData ?: it.receiptData,
                 activeOverlayTab = if (isApprovalStep) OverlayTab.APPROVAL else it.activeOverlayTab,
                 statusLog = step.message
             )
